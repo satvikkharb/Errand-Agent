@@ -265,7 +265,29 @@ class ToolGateway:
         s = self._session()
         old = {} if s["state"] in ("DONE", "FAILED") else s["request_frame"]  # new errand: fresh frame
         updates = a.model_dump(mode="json", exclude_none=True, exclude={"clear"})
+        ignored = {}
+        if "area" in updates:  # a bad area must not throw away the valid fields sent with it
+            area = self._canonical_area(updates.pop("area"))
+            if area:
+                updates["area"] = area
+            else:
+                ignored["area"] = {"value": a.area, "serviceable_areas": self.d.store.areas(),
+                                   "hint": "area is the neighbourhood the user is in, not a room or an item. "
+                                           "Ask which of these areas, unless it is already filled from saved preferences."}
         new, changed = fr.apply_updates(old, updates, list(a.clear))
+        from_memory = [k for k in old.get("_from_memory", []) if k not in updates]
+        if not new.get("area") and "area" not in a.clear:  # saved home area fills the gap, in code
+            saved = next((m["value"] for m in self.d.app.active_memories(self.ctx.user_id)
+                          if m["key"] == "preferred_area"), None)
+            area = self._canonical_area(saved) if isinstance(saved, str) else None
+            if area:
+                new["area"] = area
+                from_memory.append("area")
+                changed = sorted({*changed, "area"})
+        if from_memory:
+            new["_from_memory"] = from_memory
+        else:
+            new.pop("_from_memory", None)
         if new.get("date_start"):
             if date.fromisoformat(new["date_start"]) < self._today():
                 return _err("update_request_frame", "date_in_past", today=self._today().isoformat())
@@ -287,7 +309,8 @@ class ToolGateway:
             self._move("INTAKE" if (miss or part) else "SEARCH")
         return ToolOutcome("update_request_frame", {
             "status": "ok", "frame": fr.public(new), "changed": changed, "missing": miss, "partial": part,
-            "approval_voided": voided is not None})
+            "from_saved_preferences": from_memory, "approval_voided": voided is not None,
+            **({"ignored": ignored} if ignored else {})})
 
     def _t_search_providers(self, _: NoArgs) -> ToolOutcome:
         frame = self._session()["request_frame"]
@@ -296,23 +319,35 @@ class ToolGateway:
             return _err("search_providers", "missing_fields", missing=miss, partial=part)
         res = self.d.tools.search_providers(frame["service"], frame["area"],
                                             {"start": frame["date_start"], "end": frame["date_end"]})
-        matches, over_budget, no_slot = [], 0, 0
+        prefs = {m["key"]: m["value"] for m in self.d.app.active_memories(self.ctx.user_id)}
+        is_avoided = self._matcher(prefs.get("avoid_provider"))
+        is_preferred = self._matcher(prefs.get(f"preferred_{frame['service']}"))
+        matches, over_budget, no_slot, avoided = [], 0, 0, 0
         for p in res["providers"]:
             slots = [s for s in p["slots"] if fr.slot_in_window(s, frame)]
             too_pricey = frame.get("budget_max") is not None and p["price"] > frame["budget_max"]
             over_budget += too_pricey
             no_slot += not slots
-            if slots and not too_pricey:
+            if slots and not too_pricey and is_avoided(p):  # a stored "avoid" is a hard filter, not a hint
+                avoided += 1
+            elif slots and not too_pricey:
                 matches.append({**p, "slots": slots})
-        matches.sort(key=lambda p: (-p["rating"], p["price"], p["id"]))
+        matches.sort(key=lambda p: (not is_preferred(p), -p["rating"], p["price"], p["id"]))
         top = matches[:MAX_MATCHES]
-        frame["_search"] = {"slots": {p["id"]: [s["id"] for s in p["slots"]] for p in top},
-                            "prices": {p["id"]: p["price"] for p in top}}
+        frame["_search"] = {
+            "slots": {p["id"]: [s["id"] for s in p["slots"]] for p in top},
+            "prices": {p["id"]: p["price"] for p in top},
+            # kept so the model still has exact ids/names on later turns (tool results are not replayed)
+            "names": {p["id"]: self._provider_name(p) for p in top},
+            "ratings": {p["id"]: p["rating"] for p in top},
+            "times": {s["id"]: s["start"] for p in top for s in p["slots"]}}
         self._save_frame(frame)
-        excluded = {"found": len(res["providers"]), "over_budget": over_budget, "no_slot_in_window": no_slot}
+        excluded = {"found": len(res["providers"]), "over_budget": over_budget, "no_slot_in_window": no_slot,
+                    "avoided_by_saved_preference": avoided}
         if not top:
             self._move("SEARCH")
-            hint = [k for k, n in (("budget", over_budget), ("time_window", no_slot), ("date", 1)) if n]
+            hint = ["service_or_area"] if not res["providers"] else \
+                [k for k, n in (("budget", over_budget), ("time_window", no_slot), ("date", 1)) if n]
             return ToolOutcome("search_providers", {"status": "no_matches", "excluded": excluded,
                                                     "suggest_asking_user_to_relax": hint})
         self._move("PICK")
@@ -320,7 +355,17 @@ class ToolGateway:
             "status": "ok", "note": UNTRUSTED, "excluded": excluded,
             "matches": [{"rank": i + 1, "id": p["id"], "name": p["name"], "rating": p["rating"],
                          "price": p["price"], "visit_fee": p["attributes"].get("visit_fee"),
+                         **({"user_preferred": True} if is_preferred(p) else {}),
                          "slots": p["slots"][:6]} for i, p in enumerate(top)]})
+
+    def _canonical_area(self, text: str) -> str | None:
+        return next((a for a in self.d.store.areas() if a.lower() == text.strip().lower()), None)
+
+    @staticmethod
+    def _matcher(value):
+        """Saved provider preferences may be an id (pl_01) or a name."""
+        v = str(value).strip().lower() if isinstance(value, str) and value else None
+        return lambda p: bool(v) and v in (p["id"].lower(), p["name"].lower())
 
     def _t_get_provider(self, a: GetProviderArgs) -> ToolOutcome:
         p = self.d.tools.get_provider(a.provider_id)
@@ -348,6 +393,7 @@ class ToolGateway:
         slots = next((x["slots"] for x in res["providers"] if x["id"] == a.provider_id), [])
         frame = self._session()["request_frame"]
         frame.setdefault("_avail", {})[a.provider_id] = [s["id"] for s in slots]
+        frame.setdefault("_avail_times", {}).update({s["id"]: s["start"] for s in slots})
         self._save_frame(frame)
         return ToolOutcome("get_availability", {"status": "ok", "provider_id": a.provider_id, "slots": slots})
 

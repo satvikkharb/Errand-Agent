@@ -32,6 +32,9 @@ class SupabaseStore:
     def config(self):
         return self._one(self._t("scenario_config").select("*").eq("scenario", "default"))
 
+    def areas(self):
+        return sorted({r["area"] for r in self._t("providers").select("area").execute().data})
+
     def providers(self, service, area):
         return self._t("providers").select("*").eq("service", service).ilike("area", area).execute().data
 

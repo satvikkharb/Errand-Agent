@@ -420,3 +420,73 @@ def test_show_memories_displays_to_user_but_model_only_gets_a_count():
     assert "old_area" not in out.user_view
     assert out.model_view == {"status": "shown_to_user", "count": 2}
     assert [m["key"] for m in w.app.active_memories("user_demo")] == ["preferred_area"]
+
+
+# ---------------------------------------------------------------- saved provider preferences (found in live run)
+def _mem(w, key, value):
+    w.app.add_memory({"user_id": "user_demo", "key": key, "value": value, "kind": "explicit", "status": "active",
+                      "created_at": NOW, "updated_at": NOW})
+
+
+def test_saved_avoid_preference_is_a_hard_filter_not_a_hint():
+    w = World()
+    _mem(w, "avoid_provider", "pl_04")
+    out = w.searched(budget_max=2000).model_view
+    ids = [m["id"] for m in out["matches"]]
+    assert "pl_04" not in ids and out["excluded"]["avoided_by_saved_preference"] == 1
+    assert "pl_04" not in w.sess()["request_frame"]["_search"]["slots"]  # cannot be proposed either
+    assert w.call("propose_book", provider_id="pl_04", slot_id="pl_04_1103_09").error == "not_in_search_results"
+
+
+def test_saved_preferred_provider_ranks_first_by_id_or_name():
+    for value in ("pl_02", "AquaPro Services"):
+        w = World()
+        _mem(w, "preferred_plumber", value)
+        ms = w.searched(budget_max=2000).model_view["matches"]
+        assert ms[0]["id"] == "pl_02" and ms[0]["user_preferred"] is True
+        assert [m["id"] for m in ms[1:]] == ["pl_03", "pl_01", "pl_04"]  # rest still by rating
+
+
+# ---------------------------------------------------------------- area handling (found in live run: "kitchen tap" -> area "kitchen")
+def test_bad_area_is_ignored_but_valid_fields_in_the_same_call_are_kept():
+    w = World()
+    out = w.call("update_request_frame", service="plumber", area="kitchen", budget_max=1500).model_view
+    assert out["ignored"]["area"]["serviceable_areas"] == ["Indiranagar", "Koramangala"]
+    assert out["frame"] == {"service": "plumber", "budget_max": 1500} and "area" in out["missing"]
+    assert w.call("update_request_frame", area="indiranagar").model_view["frame"]["area"] == "Indiranagar"
+
+
+def test_bad_area_falls_back_to_saved_home_area():
+    w = World()
+    _mem(w, "preferred_area", "Indiranagar")
+    out = w.call("update_request_frame", service="plumber", area="kitchen").model_view
+    assert out["frame"]["area"] == "Indiranagar" and "area" not in out["missing"] and out["ignored"]["area"]
+
+
+def test_saved_home_area_fills_in_by_code_and_user_can_override_or_clear():
+    w = World()
+    _mem(w, "preferred_area", "Indiranagar")
+    out = w.call("update_request_frame", service="plumber").model_view
+    assert out["frame"]["area"] == "Indiranagar" and out["from_saved_preferences"] == ["area"]
+    assert "area" not in out["missing"]
+    out = w.call("update_request_frame", area="Koramangala").model_view  # user says otherwise
+    assert out["frame"]["area"] == "Koramangala" and out["from_saved_preferences"] == []
+    w2 = World()
+    _mem(w2, "preferred_area", "Indiranagar")
+    w2.call("update_request_frame", service="plumber")
+    out = w2.call("update_request_frame", clear=["area"]).model_view  # explicit clear: ask again, don't refill
+    assert "area" in out["missing"]
+
+
+def test_unconfirmed_or_forgotten_area_is_never_used_to_prefill():
+    w = World()
+    w.app.add_memory({"user_id": "user_demo", "key": "preferred_area", "value": "Indiranagar", "kind": "inferred",
+                      "status": "pending_confirmation", "created_at": NOW, "updated_at": NOW})
+    assert "area" in w.call("update_request_frame", service="plumber").model_view["missing"]
+
+
+def test_no_providers_at_all_points_at_service_or_area_not_the_date():
+    w = World()
+    w.store._providers = {k: v for k, v in w.store._providers.items() if v["service"] != "plumber"}
+    out = w.searched().model_view
+    assert out["status"] == "no_matches" and out["suggest_asking_user_to_relax"] == ["service_or_area"]

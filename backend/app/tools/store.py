@@ -10,6 +10,7 @@ from app.tools import seed_data
 
 class Store(Protocol):
     def config(self) -> dict | None: ...
+    def areas(self) -> list[str]: ...  # areas we have providers in
     def providers(self, service: str, area: str) -> list[dict]: ...
     def provider(self, pid: str) -> dict | None: ...
     def reviews(self, pid: str) -> list[dict]: ...
@@ -49,6 +50,9 @@ class InMemoryStore:
 
     def config(self):
         return dict(self._config) if self._config else None
+
+    def areas(self):
+        return sorted({p["area"] for p in self._providers.values()})
 
     def providers(self, service, area):
         return [dict(p) for p in self._providers.values()
