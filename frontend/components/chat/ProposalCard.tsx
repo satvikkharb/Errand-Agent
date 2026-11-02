@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { Proposal } from "@/lib/agent";
 
-export type ProposalState = "pending" | "approved" | "declined";
+import type { ProposalState } from "@/lib/chat";
 
 type Props = {
   proposal: Proposal;
@@ -52,7 +52,7 @@ export function ProposalCard({ proposal: p, state, atLimit, onApprove, onChange 
                 onClick={onApprove}
                 className="rounded-full bg-orange px-5 py-2 text-[14px] font-semibold transition-transform hover:-translate-y-0.5 active:translate-y-0"
               >
-                Approve
+                Approve and pay
               </button>
             )}
             <button

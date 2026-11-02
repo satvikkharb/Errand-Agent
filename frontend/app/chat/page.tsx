@@ -4,19 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { askAgent, type Message } from "@/lib/agent";
 import { signOut, useSession } from "@/lib/session";
-import { Sidebar, type Errand } from "@/components/chat/Sidebar";
-import { ProposalCard, type ProposalState } from "@/components/chat/ProposalCard";
+import { resetChat, setChat, useChat } from "@/lib/chat";
+import { Sidebar } from "@/components/chat/Sidebar";
+import { ProposalCard } from "@/components/chat/ProposalCard";
 import { Composer } from "@/components/chat/Composer";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Orange } from "@/components/Orange";
 
 const FREE_LIMIT = 3;
-
-const SEED_ERRANDS: Errand[] = [
-  { id: "s1", title: "Socket repair", note: "Booked for Thursday, 10:00" },
-  { id: "s2", title: "AC service", note: "Done, 12 Oct", done: true },
-  { id: "s3", title: "Kitchen sink unblocked", note: "Done, 3 Sep", done: true },
-];
 
 const STARTERS = [
   "My kitchen tap won't stop dripping",
@@ -30,9 +25,7 @@ export default function ChatPage() {
   const router = useRouter();
   const { session, ready } = useSession();
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [states, setStates] = useState<Record<string, ProposalState>>({});
-  const [errands, setErrands] = useState<Errand[]>(SEED_ERRANDS);
+  const { messages, states, errands } = useChat();
   const [thinking, setThinking] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [leaving, setLeaving] = useState(false);
@@ -70,27 +63,20 @@ export default function ChatPage() {
     .reverse()
     .find((m) => m.role === "agent" && m.proposal && (states[m.proposal.id] ?? "pending") === "pending");
 
+  // Approving doesn't book yet: the call-out fee is paid on Hippopay first, which then books it.
   function approve(m: Message) {
     if (m.role !== "agent" || !m.proposal) return;
-    const p = m.proposal;
-    setStates((s) => ({ ...s, [p.id]: "approved" }));
-    setErrands((e) => [
-      { id: uid(), title: `${p.trade}, ${p.provider.split(",")[0]}`, note: `Booked for ${p.when.split(",")[0].replace("Tomorrow", "tomorrow")}` },
-      ...e,
-    ]);
-    setMessages((ms) => [
-      ...ms,
-      {
-        id: uid(),
-        role: "agent",
-        text: `Done! ${p.provider.split(" ")[0]} is booked for ${p.when.toLowerCase()}. You'll get a nudge an hour before they arrive. 🍊`,
-      },
-    ]);
+    setChat((s) => ({ ...s, checkout: m.proposal! }));
+    router.push("/hippopay");
+  }
+
+  function decline(id: string) {
+    setChat((s) => ({ ...s, states: { ...s.states, [id]: "declined" } }));
   }
 
   async function send(text: string) {
     const history = [...messages, { id: uid(), role: "user", text } as Message];
-    setMessages(history);
+    setChat((s) => ({ ...s, messages: history }));
 
     if (pending && !atLimit && /^(yes|yep|ok|okay|approve|book it|go ahead|sure)\b/i.test(text)) {
       approve(pending);
@@ -101,10 +87,9 @@ export default function ChatPage() {
     try {
       const reply = await askAgent(text, history);
       if (/(different|another|later|other time|reschedule)/i.test(text) && pending?.role === "agent") {
-        const id = pending.proposal!.id;
-        setStates((s) => ({ ...s, [id]: "declined" }));
+        decline(pending.proposal!.id);
       }
-      setMessages((ms) => [...ms, ...reply]);
+      setChat((s) => ({ ...s, messages: [...s.messages, ...reply] }));
     } finally {
       setThinking(false);
     }
@@ -112,18 +97,20 @@ export default function ChatPage() {
 
   function reschedule(m: Message) {
     if (m.role !== "agent" || !m.proposal) return;
-    const id = m.proposal.id;
-    setStates((s) => ({ ...s, [id]: "declined" }));
+    decline(m.proposal.id);
     void send("Can we try a different time?");
   }
 
   function newErrand() {
-    setMessages([]);
-    setStates({});
+    setChat((s) => ({ ...s, messages: [], states: {} }));
     setDrawer(false);
   }
 
   function logOut() {
+    // Cache Components keeps this page alive in the background, so clear everything that could
+    // greet the next login: the dialog, the thread and the previous user's errands.
+    setLeaving(false);
+    resetChat();
     signOut();
     router.replace("/login");
   }

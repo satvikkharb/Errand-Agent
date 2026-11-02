@@ -5,7 +5,7 @@ import { Orange } from "@/components/Orange";
 import { Logo } from "@/components/Logo";
 import type { Session } from "@/lib/session";
 
-export type Errand = { id: string; title: string; note: string; done?: boolean };
+import type { Errand } from "@/lib/chat";
 
 type Props = {
   session: Session;
