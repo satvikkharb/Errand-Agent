@@ -4,6 +4,7 @@ InMemoryAppStore is used by tests and evals. The Supabase-backed version (same m
 from db/0001_schema.sql) is added with the orchestrator.
 """
 import copy
+import re
 import uuid
 from datetime import datetime, timedelta
 
@@ -64,8 +65,16 @@ class InMemoryAppStore:
                 if m["status"] == "active" and m["superseded_by"] is None and m["value"] is not None]
 
     # ---- summaries ----
-    def add_summary(self, user_id: str, text: str, session_id: str | None = None, covers_up_to_seq: int = 0) -> None:
-        self._summaries.append({"id": str(uuid.uuid4()), "user_id": user_id, "text": text, "invalidated_at": None})
+    def add_summary(self, user_id: str, text: str, session_id: str | None = None, covers_up_to_seq: int = 0) -> dict:
+        row = {"id": str(uuid.uuid4()), "user_id": user_id, "session_id": session_id, "text": text,
+               "covers_up_to_seq": covers_up_to_seq, "invalidated_at": None}
+        self._summaries.append(row)
+        return dict(row)
+
+    def invalidate_summary(self, summary_id: str, now: datetime) -> None:
+        for s in self._summaries:
+            if s["id"] == summary_id:
+                s["invalidated_at"] = s["invalidated_at"] or now
 
     def invalidate_summaries(self, user_id: str, now: datetime) -> int:
         n = 0
@@ -78,6 +87,9 @@ class InMemoryAppStore:
     def valid_summaries(self, user_id: str) -> list[dict]:
         return [dict(s) for s in self._summaries if s["user_id"] == user_id and s["invalidated_at"] is None]
 
+    def sessions_for_user(self, user_id: str) -> list[dict]:
+        return [copy.deepcopy(s) for s in self._sessions.values() if s["user_id"] == user_id]
+
     # ---- messages ----
     def add_message(self, session_id: str, role: str, content: str, run_id: str | None = None) -> dict:
         rows = self._messages.setdefault(session_id, [])
@@ -88,6 +100,20 @@ class InMemoryAppStore:
 
     def messages(self, session_id: str) -> list[dict]:
         return [dict(m) for m in self._messages.get(session_id, [])]
+
+    def redact_messages(self, user_id: str, needle: str) -> int:
+        """Replace a forgotten fact wherever the user's own chat history still contains it."""
+        if len(needle.strip()) < 4:
+            return 0
+        pat, n = re.compile(re.escape(needle), re.I), 0
+        for sid, rows in self._messages.items():
+            if self._sessions[sid]["user_id"] != user_id:
+                continue
+            for m in rows:
+                new = pat.sub("[forgotten]", m["content"])
+                if new != m["content"]:
+                    m["content"], n = new, n + 1
+        return n
 
     # ---- runs and trace spans ----
     def create_run(self, session_id: str, trigger: str, deadline: datetime, now: datetime) -> dict:
@@ -155,14 +181,25 @@ class InMemoryAppStore:
 
     # ---- notifications (the local "push": shown next time the user opens the chat) ----
     def add_notification(self, user_id: str, session_id: str | None, body: str, now: datetime,
-                         event_id: str | None = None) -> dict:
+                         event_id: str | None = None, urgency: str = "normal") -> dict:
         row = {"id": str(uuid.uuid4()), "user_id": user_id, "session_id": session_id, "event_id": event_id,
-               "body": body, "created_at": now, "read_at": None}
+               "body": body, "created_at": now, "read_at": None, "urgency": urgency}
         self._notifications.append(row)
         return dict(row)
 
-    def notifications(self, user_id: str) -> list[dict]:
-        return [dict(n) for n in self._notifications if n["user_id"] == user_id]
+    def notifications(self, user_id: str, unread_only: bool = False) -> list[dict]:
+        return [dict(n) for n in self._notifications
+                if n["user_id"] == user_id and (not unread_only or n["read_at"] is None)]
+
+    def notification_for_event(self, event_id: str) -> dict | None:
+        return next((dict(n) for n in self._notifications if n["event_id"] == event_id), None)
+
+    def mark_notification_read(self, notification_id: str, user_id: str, now: datetime) -> bool:
+        for n in self._notifications:
+            if n["id"] == notification_id and n["user_id"] == user_id:
+                n["read_at"] = n["read_at"] or now
+                return True
+        return False
 
     # ---- per-user lock (expires on its own so a crash can never wedge a user) ----
     def acquire_lock(self, user_id: str, now: datetime, ttl_s: int = 60) -> bool:

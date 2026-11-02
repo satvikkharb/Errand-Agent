@@ -7,6 +7,7 @@ Trace spans are buffered per run and written in one insert when the run closes (
 chat turn costs one extra round trip, not one per span.
 """
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
 
@@ -103,8 +104,17 @@ class SupabaseAppStore:
             if not ids:
                 raise ValueError("a summary needs a session")
             session_id = ids[-1]
-        self._t("conversation_summaries").insert(
-            {"session_id": session_id, "text": text, "covers_up_to_seq": covers_up_to_seq}).execute()
+        row = self._t("conversation_summaries").insert(
+            {"session_id": session_id, "text": text, "covers_up_to_seq": covers_up_to_seq}).execute().data[0]
+        return {**_read(row), "user_id": user_id}
+
+    def invalidate_summary(self, summary_id, now):
+        if _uuid_ok(summary_id):
+            self._t("conversation_summaries").update({"invalidated_at": now.isoformat()}).eq("id", summary_id) \
+                .is_("invalidated_at", "null").execute()
+
+    def sessions_for_user(self, user_id):
+        return [_read(r) for r in self._t("sessions").select("*").eq("user_id", user_id).execute().data]
 
     def invalidate_summaries(self, user_id, now):
         ids = self._session_ids(user_id)
@@ -134,6 +144,22 @@ class SupabaseAppStore:
             return []
         rows = self._t("messages").select("*").eq("session_id", session_id).order("seq").execute().data
         return [_read(r) for r in rows]
+
+    def redact_messages(self, user_id, needle):
+        """Replace a forgotten fact wherever the user's own chat history still contains it."""
+        ids = self._session_ids(user_id)
+        if not ids or len(needle.strip()) < 4:
+            return 0
+        pat, n = re.compile(re.escape(needle), re.I), 0
+        q = self._t("messages").select("id,content").in_("session_id", ids)
+        if not any(c in needle for c in "%_\\*,()"):  # safe to let the database narrow it down
+            q = q.ilike("content", f"%{needle}%")
+        for r in q.execute().data:
+            new = pat.sub("[forgotten]", r["content"])
+            if new != r["content"]:
+                self._t("messages").update({"content": new}).eq("id", r["id"]).execute()
+                n += 1
+        return n
 
     # ---- runs and trace spans ----
     def create_run(self, session_id, trigger, deadline, now):
@@ -203,13 +229,26 @@ class SupabaseAppStore:
         return [_read(r) for r in rows]
 
     # ---- notifications ----
-    def add_notification(self, user_id, session_id, body, now, event_id=None):
-        row = {"user_id": user_id, "session_id": session_id, "event_id": event_id, "body": body, "created_at": now}
+    def add_notification(self, user_id, session_id, body, now, event_id=None, urgency="normal"):
+        row = {"user_id": user_id, "session_id": session_id, "event_id": event_id, "body": body,
+               "created_at": now, "urgency": urgency}
         return _read(self._t("notifications").insert(_write(row)).execute().data[0])
 
-    def notifications(self, user_id):
-        rows = self._t("notifications").select("*").eq("user_id", user_id).order("created_at").execute().data
-        return [_read(r) for r in rows]
+    def notifications(self, user_id, unread_only=False):
+        q = self._t("notifications").select("*").eq("user_id", user_id)
+        if unread_only:
+            q = q.is_("read_at", "null")
+        return [_read(r) for r in q.order("created_at").execute().data]
+
+    def notification_for_event(self, event_id):
+        return self._one(self._t("notifications").select("*").eq("event_id", event_id))
+
+    def mark_notification_read(self, notification_id, user_id, now):
+        if not _uuid_ok(notification_id):
+            return False
+        rows = (self._t("notifications").update({"read_at": now.isoformat()}).eq("id", notification_id)
+                .eq("user_id", user_id).execute().data)
+        return len(rows) > 0
 
     # ---- per-user lock ----
     def acquire_lock(self, user_id, now, ttl_s=60):

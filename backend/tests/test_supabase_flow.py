@@ -19,6 +19,7 @@ from app.clock import IST, FixedClock
 from app.db import get_db
 from app.llm import ScriptedLLM, call
 from app.tools.config import ScenarioConfig
+from app.tools.sim import provider_cancels
 from app.tools.supabase_store import SupabaseStore
 from tests.test_app_store_contract import cleanup_user_data
 from tests.test_orchestrator import FIRST_MSG, find_steps
@@ -49,6 +50,7 @@ def user():
     keys = [f"idem_{a}" for a in aids] + [f"attempt:book:{h}" for h in holds if h] + \
            [f"attempt:cancel:idem_{a}" for a in aids]
     bookings = db.table("bookings").select("id,slot_id").eq("user_id", uid).execute().data
+    booking_ids = [b["id"] for b in bookings]
     slots.update(b["slot_id"] for b in bookings)
     if keys:
         db.table("idempotency_keys").delete().in_("key", keys).execute()
@@ -58,6 +60,8 @@ def user():
     if slots - {None}:
         db.table("slots").update({"status": "free"}).in_("id", list(slots - {None})).execute()
     cleanup_user_data(db, [uid])
+    if booking_ids:  # notifications referenced these events, so they go last
+        db.table("events").delete().in_("booking_id", booking_ids).execute()
 
 
 def to_card(o, app, uid):
@@ -143,3 +147,80 @@ def test_lock_blocks_a_second_chat_for_the_same_user(user):
     app.acquire_lock(user, NOW, 60)
     r = o.handle_message(user, "hello")
     assert r.busy and r.reply.startswith("I'm still working")
+
+
+def test_proactive_cancellation_end_to_end_on_supabase(user):
+    o, app, store, _ = process(forced=("success",))
+    slot = store.free_slots("ac_01", datetime(2026, 11, 6, tzinfo=IST), datetime(2026, 11, 7, tzinfo=IST))[0]
+    assert store.claim_slot(slot["id"], "free", "booked")
+    app.ensure_user(user)
+    bid = f"bk_t{uuid.uuid4().hex[:6]}"
+    store.add_booking({"id": bid, "user_id": user, "provider_id": "ac_01", "slot_id": slot["id"],
+                       "service": "ac_servicing", "slot_start": slot["start_at"], "status": "confirmed",
+                       "price": 899, "hold_id": None, "idempotency_key": None, "created_at": NOW})
+    provider_cancels(store, bid)  # the world cancels; nobody messages the agent
+    ev = get_db().table("events").select("*").eq("booking_id", bid).execute().data
+    assert len(ev) == 1 and ev[0]["status"] == "pending" and ev[0]["payload"]["user_id"] == user
+
+    res = o.tick(user_id=user)  # filters events by payload->>user_id, claims by compare-and-set
+    assert [r["outcome"] for r in res] == ["notified"] and res[0]["has_replacement"]
+    assert o.tick(user_id=user) == []  # nothing left, and a second worker could not re-claim it
+    ev = get_db().table("events").select("*").eq("booking_id", bid).execute().data[0]
+    assert ev["status"] == "done" and ev["run_id"] and ev["processed_at"]
+
+    o2, app2, store2, _ = process()  # a different server sees it all
+    note = app2.notifications(user, unread_only=True)
+    assert len(note) == 1 and note[0]["event_id"] == ev["id"] and "cancelled" in note[0]["body"]
+    sid = note[0]["session_id"]
+    assert app2.session(sid)["request_frame"]["_suggestion"]["provider_id"] != "ac_01"
+    assert my_bookings(user)[0]["status"] == "cancelled_by_provider" and len(my_bookings(user)) == 1  # nothing rebooked
+
+    r = o2.open_proposal(user, sid)  # fresh hold + fresh approval only now
+    assert r.approval_card and r.state == "AWAIT_APPROVAL"
+    out = o2.approve(user, r.approval_card["approval_id"])
+    assert out.reply.startswith("Booked and verified")
+    assert sorted(b["status"] for b in my_bookings(user)) == ["cancelled_by_provider", "confirmed"]
+    assert app2.mark_notification_read(note[0]["id"], user, NOW) and app2.notifications(user, unread_only=True) == []
+    runs = [x for x in app2.spans(ev["run_id"])]
+    assert any(x["kind"] == "event" and x["name"] == "provider_cancelled" for x in runs)  # trace persisted
+
+
+def test_memory_service_and_summarizer_on_supabase(user):
+    """Real PostgREST: redaction via ilike, supersede, inference prompt, confirm, rolling summary, forget."""
+    from app.agent.memory import MemoryService
+    from app.agent.summarizer import Summarizer
+    from app.llm import say
+
+    app, clock = SupabaseAppStore(), FixedClock(NOW)
+    m = MemoryService(app, clock)
+    s = app.create_session(user)
+    sid = s["id"]
+    assert m.write_explicit(user, "preferred_area", "Koramangala") == "saved"
+    assert m.write_explicit(user, "preferred_area", "Indiranagar") == "updated"
+    assert [x["value"] for x in app.active_memories(user)] == ["Indiranagar"]  # the old version is superseded
+
+    def b(i, hour):
+        return {"id": f"b{i}", "provider_id": "pl_01", "service": "plumber", "status": "completed",
+                "slot_start": datetime(2026, 9, i, hour, tzinfo=IST)}
+    prompt = m.after_booking(user, sid, [b(1, 15), b(2, 16)], lambda pid: "QuickFix Plumbing")
+    assert prompt["key"] == "preferred_plumber" and "QuickFix Plumbing" in prompt["text"]
+    assert app.session(sid)["request_frame"]["_confirm_memory"] == prompt["memory_id"]
+    assert prompt["memory_id"] not in {x["id"] for x in app.active_memories(user)}  # a guess stays out until confirmed
+    assert m.after_booking(user, sid, [b(1, 15), b(2, 16)], lambda pid: "x") is None  # one question at a time
+    assert m.confirm(user, prompt["memory_id"])["status"] == "active"
+    assert "preferred_plumber" in {x["key"] for x in app.active_memories(user)}
+
+    for i in range(1, 13):
+        app.add_message(sid, "user" if i % 2 else "assistant", f"turn {i}: I live in Indiranagar, kitchen tap")
+    llm = ScriptedLLM([say("The user lives in Indiranagar and has a leaking tap.")])
+    row = Summarizer(app, llm, clock, trigger=6, keep=2).ensure(sid, user)
+    assert row["covers_up_to_seq"] == 10 and [x["id"] for x in app.valid_summaries(user)] == [row["id"]]
+
+    frame = app.session(sid)["request_frame"]
+    frame.update({"area": "Indiranagar", "_from_memory": ["area"]})
+    app.update_session(sid, request_frame=frame)
+    out = m.forget(user, key="preferred_area")
+    assert out["count"] == 2 and out["messages_redacted"] == 12 and out["summaries_dropped"] == 1
+    assert all("Indiranagar" not in x["content"] and "[forgotten]" in x["content"] for x in app.messages(sid))
+    assert app.valid_summaries(user) == [] and "area" not in app.session(sid)["request_frame"]
+    assert [x["key"] for x in m.list_for_user(user)] == ["preferred_plumber"]  # no tombstones, no history

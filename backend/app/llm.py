@@ -40,8 +40,8 @@ class OpenAILLM:
         self.model = model
 
     def complete(self, messages: list[dict], tools: list[dict]) -> LLMResponse:
-        r = self.client.chat.completions.create(
-            model=self.model, messages=messages, tools=tools, tool_choice="auto", parallel_tool_calls=False)
+        extra = {"tools": tools, "tool_choice": "auto", "parallel_tool_calls": False} if tools else {}
+        r = self.client.chat.completions.create(model=self.model, messages=messages, **extra)
         msg = r.choices[0].message
         return LLMResponse(
             content=msg.content,

@@ -23,3 +23,14 @@ class InMemoryTracer:
 
     def of(self, kind: str) -> list[dict]:
         return [s for s in self.spans if s["kind"] == kind]
+
+
+class AppTracer:
+    """Writes spans to the app store under one run id."""
+
+    def __init__(self, app, run_id: str):
+        self.app, self.run_id = app, run_id
+
+    def span(self, kind, name, input=None, output=None, latency_ms=None, error=None, **extra):
+        self.app.add_span(self.run_id, {"kind": kind, "name": name, "input": input, "output": output,
+                                        "latency_ms": latency_ms, "error": error, **extra})

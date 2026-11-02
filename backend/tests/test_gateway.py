@@ -108,9 +108,9 @@ def test_state_moves_to_search_when_frame_complete_and_is_traced():
     w = World()
     w.call("update_request_frame", service="plumber")
     assert w.sess()["state"] == "INTAKE"
-    w.ready()
-    assert w.sess()["state"] == "SEARCH"
-    assert w.tracer.of("state_transition")[-1]["name"] == "INTAKE->SEARCH"
+    w.ready()  # complete => the search runs at once
+    assert w.sess()["state"] == "PICK"
+    assert [t["name"] for t in w.tracer.of("state_transition")] == ["INTAKE->SEARCH", "SEARCH->PICK"]
 
 
 # ---------------------------------------------------------------- search
@@ -245,8 +245,8 @@ def test_material_change_voids_approval_and_releases_hold(change):
     assert out.model_view["approval_voided"] is True
     assert w.app.approval(aid)["status"] == "invalidated"
     assert w.sess()["pending_approval_id"] is None and w.store.slot(sid)["status"] == "free"
-    assert w.sess()["state"] in ("SEARCH", "INTAKE")
-    assert "_search" not in w.sess()["request_frame"]
+    assert w.sess()["state"] in ("PICK", "SEARCH", "INTAKE")
+    assert out.model_view["search"]["status"] in ("ok", "no_matches")  # old results were dropped and rebuilt for the change
 
 
 def test_non_material_change_keeps_approval():
@@ -403,7 +403,7 @@ def test_forget_tombstones_value_and_drops_summaries():
     assert row["value"] is None and row["status"] == "forgotten" and row["forgotten_at"]
     assert w.app.active_memories("user_demo") == [] and w.app.valid_summaries("user_demo") == []
     assert w.call("forget_memory", key="preferred_area", quote="forget my area").error == "not_found"
-    assert w.call("forget_memory", key="all", quote="delete everything").error == "quote_not_in_user_message"
+    assert w.call("forget_memory", key="all").error == "no_forget_request"  # "all" needs the user to say everything
 
 
 def test_show_memories_displays_to_user_but_model_only_gets_a_count():
@@ -490,3 +490,90 @@ def test_no_providers_at_all_points_at_service_or_area_not_the_date():
     w.store._providers = {k: v for k, v in w.store._providers.items() if v["service"] != "plumber"}
     out = w.searched().model_view
     assert out["status"] == "no_matches" and out["suggest_asking_user_to_relax"] == ["service_or_area"]
+
+
+# ---------------------------------------------------------------- results come from the tool, in the same call (live-run fix)
+def test_a_complete_request_searches_by_itself_and_returns_real_results():
+    w = World()
+    partial = w.call("update_request_frame", service="plumber", area="Indiranagar").model_view
+    assert "search" not in partial  # still missing things: no search yet
+    out = w.call("update_request_frame", date_start="2026-11-03", window_start="09:00", window_end="13:00",
+                 budget_max=1500).model_view
+    assert out["missing"] == [] and out["search"]["status"] == "ok"
+    ids = {m["id"] for m in out["search"]["matches"]}
+    assert ids and set(w.sess()["request_frame"]["_search"]["slots"]) == ids and w.sess()["state"] == "PICK"
+    # the model can propose straight away: no separate search call needed, nothing to invent
+    m = out["search"]["matches"][0]
+    assert w.call("propose_book", provider_id=m["id"], slot_id=m["slots"][0]["id"]).ends_turn
+
+
+def test_auto_search_reruns_only_when_the_request_really_changes():
+    w = World()
+    first = w.ready().model_view["search"]["matches"]
+    again = w.call("update_request_frame", preferences=["call before arriving"]).model_view
+    assert "search" not in again  # a non-material tweak keeps the current results
+    moved = w.call("update_request_frame", date_start="2026-11-04").model_view
+    assert "search" in moved and moved["search"]["matches"] != first
+
+
+def test_auto_search_can_be_switched_off_for_code_driven_flows():
+    w = World()
+    w.gw.ctx.auto_search = False
+    out = w.ready().model_view
+    assert out["missing"] == [] and "search" not in out and w.sess()["state"] == "SEARCH"
+
+
+# ---------------------------------------------------------------- errors the model can act on (live-run fix)
+def test_forgetting_depends_on_what_the_user_typed_not_on_the_models_quote():
+    """Found live (4 of 4 runs): the model quoted the sentence where the fact was STATED, not the request to
+    forget it, and never retried. Code now checks the user's own latest message."""
+    w = World(user_msg="Please forget my area.")
+    _mem(w, "preferred_area", "Indiranagar")
+    # a wrong, an irrelevant, and a missing quote all work: the user's message is what authorises it
+    assert w.call("forget_memory", key="preferred_area", quote="I live in Indiranagar").model_view["status"] == "forgotten"
+    _mem(w, "preferred_area", "Indiranagar")
+    assert w.call("forget_memory", key="preferred_area").model_view["status"] == "forgotten"
+
+
+def test_no_forgetting_unless_the_user_asked_and_never_a_wipe_all_by_implication():
+    w = World(user_msg="Find me a plumber tomorrow, my area is Indiranagar")  # no forget request
+    _mem(w, "preferred_area", "Indiranagar")
+    out = w.call("forget_memory", key="preferred_area", quote="forget my area")  # the model (or a review) pushes it
+    assert out.error == "no_forget_request" and out.model_view["latest_user_message"].startswith("Find me a plumber")
+    assert "latest message asks to forget" in out.model_view["hint"]
+    assert [m["key"] for m in w.app.active_memories("user_demo")] == ["preferred_area"]  # still there
+
+    w = World(user_msg="Please forget my area.")
+    _mem(w, "preferred_area", "Indiranagar")
+    assert w.call("forget_memory", key="all").error == "no_forget_request"  # asked about ONE thing, not everything
+    w.say("forget everything you know about me")
+    assert w.call("forget_memory", key="all").model_view["status"] == "forgotten"
+
+
+def test_a_rejected_memory_quote_tells_the_model_what_to_copy():
+    w = World(user_msg="I never want anyone before 10 am")
+    out = w.call("propose_memory", key="earliest_time", value="10:00", quote="nothing like this")
+    assert out.error == "quote_not_in_user_message" and out.model_view["latest_user_message"].startswith("I never want")
+    assert "latest message" in out.model_view["hint"]
+
+
+def test_a_badly_formatted_value_says_what_format_is_expected():
+    w = World(user_msg="I never want anyone before 10 am")
+    out = w.call("propose_memory", key="earliest_time", value=1000, quote="before 10 am")
+    assert out.error == "bad_value" and "HH:MM" in out.model_view["expected"]
+    assert w.call("propose_memory", key="earliest_time", value="10:00", quote="before 10 am").model_view["status"] == "saved"
+    out = w.call("propose_memory", key="default_budget_plumber", value="a lot", quote="before 10 am")
+    assert out.model_view["expected"] == "a positive whole number"
+
+
+def test_forget_intent_recognises_everyday_phrasings_and_ignores_unrelated_talk():
+    asks = ["Please forget my area.", "delete my budget", "Erase that", "stop remembering my area",
+            "please don't remember that", "I'd like you to remove my preferred plumber", "wipe my earliest time"]
+    for msg in asks:
+        assert World(user_msg=msg).gw._forget_requested("preferred_area"), msg
+    chat = ["Find me a plumber tomorrow", "what do you remember about me?", "I live in Indiranagar",
+            "I never want anyone before 10 am", "Thanks!", "remember that I like mornings"]
+    for msg in chat:
+        assert not World(user_msg=msg).gw._forget_requested("preferred_area"), msg
+    assert not World(user_msg="forget my area").gw._forget_requested("all")
+    assert World(user_msg="forget all of it").gw._forget_requested("all")

@@ -208,3 +208,32 @@ def test_notifications(ctx):
     store.add_notification(u, s["id"], "Your booking is confirmed", NOW)
     got = store.notifications(u)
     assert [n["body"] for n in got] == ["Your booking is confirmed"] and got[0]["read_at"] is None
+
+
+def test_redaction_summary_bookkeeping_sessions_and_prompted_at(ctx):
+    store, new_user = ctx
+    u, other = new_user(), new_user()
+    s, s2, so = store.create_session(u), store.create_session(u), store.create_session(other)
+    store.add_message(s["id"], "user", "I live in Indiranagar, near the lake")
+    store.add_message(s["id"], "assistant", "Noted, INDIRANAGAR it is")
+    store.add_message(s2["id"], "user", "nothing relevant")
+    store.add_message(so["id"], "user", "I live in Indiranagar too")
+    assert store.redact_messages(u, "indiranagar") == 2  # case-insensitive, across all the user's sessions
+    assert [m["content"] for m in store.messages(s["id"])] == ["I live in [forgotten], near the lake", "Noted, [forgotten] it is"]
+    assert store.messages(s2["id"])[0]["content"] == "nothing relevant"
+    assert store.messages(so["id"])[0]["content"] == "I live in Indiranagar too"  # other users are untouched
+    assert store.redact_messages(u, "HSR") == 0 and store.redact_messages(u, "no such text") == 0
+    assert {x["id"] for x in store.sessions_for_user(u)} == {s["id"], s2["id"]}
+
+    a = store.add_summary(u, "first", s["id"], 5)
+    store.add_summary(u, "second", s["id"], 9)
+    assert a["id"] and a["session_id"] == s["id"] and a["covers_up_to_seq"] == 5
+    store.invalidate_summary(a["id"], NOW)
+    live = store.valid_summaries(u)
+    assert [x["text"] for x in live] == ["second"] and live[0]["covers_up_to_seq"] == 9 and live[0]["session_id"] == s["id"]
+
+    m = store.add_memory({"user_id": u, "key": "preferred_plumber", "value": "pl_01", "kind": "inferred",
+                          "status": "pending_confirmation", "confidence": 0.7, "created_at": NOW, "updated_at": NOW})
+    assert m.get("prompted_at") is None
+    store.update_memory(m["id"], prompted_at=NOW)
+    assert store.memories(u)[0]["prompted_at"] == NOW

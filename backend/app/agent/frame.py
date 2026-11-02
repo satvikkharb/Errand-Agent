@@ -77,3 +77,10 @@ def slot_in_window(slot: dict, frame: dict) -> bool:
     if frame.get("window_end") and end.strftime("%H:%M") > frame["window_end"]:
         return False
     return True
+
+
+def within_hours(slot: dict, floor: str | None, ceil: str | None) -> bool:
+    """Saved earliest/latest acceptable times (HH:MM, IST). The whole slot must fit."""
+    start = datetime.fromisoformat(slot["start"]).astimezone(IST).strftime("%H:%M")
+    end = datetime.fromisoformat(slot["end"]).astimezone(IST).strftime("%H:%M")
+    return not ((floor and start < floor) or (ceil and end > ceil))

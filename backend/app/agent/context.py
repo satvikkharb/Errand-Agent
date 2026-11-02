@@ -55,7 +55,8 @@ class ContextBuilder:
         frame = session["request_frame"]
         head = [{"role": "system", "content": prompt.system_prompt(now)},
                 {"role": "system", "content": prompt.render_frame(session)}]
-        for block in (prompt.render_search(frame), prompt.render_avail(frame), prompt.render_pending(pending_approval)):
+        for block in (prompt.render_search(frame), prompt.render_suggestion(frame), prompt.render_avail(frame),
+                      prompt.render_pending(pending_approval)):
             if block:
                 head.append({"role": "system", "content": block})
         current = history[-1] if history and history[-1]["role"] == "user" else None
@@ -74,7 +75,9 @@ class ContextBuilder:
             used += message_tokens(run[idx])
             stubbed += 1
 
-        ranked = rank_memories(memories, frame.get("service"))[: self.max_memories]
+        # a finished errand's service is stale: a new errand may be for any service
+        service = None if session["state"] in ("DONE", "FAILED") else frame.get("service")
+        ranked = rank_memories(memories, service)[: self.max_memories]
         chosen: list[dict] = []
         header = count_tokens("Stored preferences (confirmed by the user):\n") + 4
         for m in ranked:
@@ -85,16 +88,22 @@ class ContextBuilder:
             used += cost
         mem_block = prompt.render_memories(chosen)
 
+        mine = [x for x in summaries if x.get("session_id") == session["id"]][-1:]  # this chat's rolling summary
+        other = [x for x in summaries if x.get("session_id") != session["id"]][-1:]  # latest earlier conversation
         sum_used: list[dict] = []
-        for s in summaries[-1:]:  # newest valid summary only
-            cost = count_tokens(s["text"]) + 10
+        for x in mine + other:  # this chat matters most, so it gets budget first
+            cost = count_tokens(x["text"]) + 10
             if used + cost <= self.budget:
-                sum_used.append(s)
+                sum_used.append(x)
                 used += cost
-        sum_block = ("Earlier conversations (summary): " + " ".join(s["text"] for s in sum_used)) if sum_used else None
+        ordered = [x for x in sum_used if x in other] + [x for x in sum_used if x in mine]
+        sum_block = ("Earlier conversation summary: " + " ".join(x["text"] for x in ordered)) if ordered else None
+        # turns the summary already stands in for are not sent twice
+        covered = max((x["covers_up_to_seq"] for x in sum_used if x in mine), default=0)
+        recent = [m for m in past if m["seq"] > covered]
 
         kept: list[dict] = []
-        for m in reversed(past[-self.history_limit:]):
+        for m in reversed(recent[-self.history_limit:]):
             cost = message_tokens(m)
             if used + cost > self.budget:
                 break
@@ -113,6 +122,7 @@ class ContextBuilder:
             "memory_ids": [m["id"] for m in chosen], "memory_keys": [m["key"] for m in chosen],
             "memories_dropped": len(memories) - len(chosen),
             "summary_ids": [s["id"] for s in sum_used],
-            "history_message_ids": [m["id"] for m in kept], "history_dropped": len(past) - len(kept),
+            "history_message_ids": [m["id"] for m in kept], "history_dropped": len(recent) - len(kept),
+            "history_covered_by_summary": len(past) - len(recent),
             "tool_results_stubbed": stubbed}
         return BuiltContext(messages, report)

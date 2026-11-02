@@ -156,7 +156,9 @@ def test_repeated_confirmation_books_once():
     second = h.o.approve("user_demo", aid)
     assert first.reply.startswith("Booked") and "already used" in second.reply
     assert len(h.bookings()) == 6 and len(h.attempts()) == 1
-    r = h.chat("yes", say("Anything else?"))  # nothing pending: a bare 'yes' is just chat
+    r = h.chat("yes")  # no approval is pending, so this can only answer the "remember this?" question
+    assert len(h.bookings()) == 6 and r.reply.startswith("Got it, I'll remember")
+    r = h.chat("yes", say("Anything else?"))  # nothing left to answer: a bare yes is just chat
     assert len(h.bookings()) == 6 and r.reply == "Anything else?"
 
 
@@ -344,9 +346,9 @@ def test_context_is_capped_filtered_and_logged():
         assert never not in text
     assert text.count("Low-relevance preference") <= 2 and ctx["memories_dropped"] >= 40
     assert "preferred_electrician" not in text  # other service's key is not relevant here either
-    # recent turns kept, oldest dropped, summary present
-    assert "Earlier assistant turn 60" in text and "Earlier user turn 1:" not in text
-    assert ctx["history_dropped"] > 0 and "Amit Electricals" in text
+    # the summary stands in for the 60 turns it covers, so they are not sent twice
+    assert "Amit Electricals" in text and "Earlier assistant turn" not in text and "Earlier user turn" not in text
+    assert ctx["history_covered_by_summary"] == 60 and ctx["history_dropped"] == 0
     # the log names exactly what was sent
     mem_ids = {m["id"] for m in h.app.active_memories("user_demo")}
     assert set(ctx["memory_ids"]) <= mem_ids and len(ctx["memory_ids"]) <= 8
@@ -357,10 +359,12 @@ def test_forgotten_fact_never_reaches_the_model_again():
           seed=True)
     h.chat("please forget my area", session_id=SEED_SESSION_ID)
     assert "Indiranagar" in "\n".join(m["content"] for m in h.llm.calls[0]["messages"])  # sanity: it was visible
-    h.chat("hello", say("Hi!"))
+    # the summary was dropped, so the next turn rebuilds it from the chat; the summarizer must not see the fact
+    h.chat("hello", say("The user booked an electrician earlier."), say("Hi!"))
+    summarizer_input = "\n".join(m["content"] for m in h.llm.calls[1]["messages"])
     after = "\n".join(m["content"] for m in h.llm.calls[-1]["messages"])
-    assert "Indiranagar" not in after and "preferred_area" not in after
-    assert h.app.valid_summaries("user_demo") == []
+    assert "Indiranagar" not in summarizer_input and "Indiranagar" not in after and "preferred_area" not in after
+    assert [x["text"] for x in h.app.valid_summaries("user_demo")] == ["The user booked an electrician earlier."]
 
 
 def test_tool_results_are_dropped_before_budget_is_blown():
