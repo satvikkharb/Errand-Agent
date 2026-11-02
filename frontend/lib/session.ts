@@ -2,9 +2,16 @@
 
 import { useSyncExternalStore } from "react";
 
-// Mock auth: a session lives in localStorage. Swap for Supabase auth when the backend is wired in.
+// Mock auth: a session lives in localStorage. The backend has no auth yet and trusts the `user_id`
+// string it is sent, so we derive a stable one from the email. Swap for Supabase auth later and
+// use the real user id here.
 export type Plan = "free" | "plus";
-export type Session = { name: string; email: string; plan: Plan };
+export type Session = { name: string; email: string; plan: Plan; userId: string };
+
+/** Backend limit is 64 chars. "satvik@home.com" -> "u_satvik_home_com". */
+export function userIdFor(email: string) {
+  return `u_${email.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`.slice(0, 64);
+}
 
 const KEY = "errand.session";
 const listeners = new Set<() => void>();
@@ -58,7 +65,8 @@ export function useSession(): { session: Session | null; ready: boolean } {
   const ready = useSyncExternalStore(noopSubscribe, () => true, () => false);
   let session: Session | null = null;
   try {
-    session = raw ? (JSON.parse(raw) as Session) : null;
+    const parsed = raw ? (JSON.parse(raw) as Omit<Session, "userId"> & { userId?: string }) : null;
+    session = parsed ? { ...parsed, userId: parsed.userId ?? userIdFor(parsed.email) } : null;
   } catch {}
   return { session, ready };
 }

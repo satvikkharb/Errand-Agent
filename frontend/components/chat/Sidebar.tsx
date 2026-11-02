@@ -3,20 +3,22 @@
 import Link from "next/link";
 import { Orange } from "@/components/Orange";
 import { Logo } from "@/components/Logo";
-import type { Session } from "@/lib/session";
-
+import type { Notification } from "@/lib/api";
 import type { Errand } from "@/lib/chat";
+import type { Session } from "@/lib/session";
 
 type Props = {
   session: Session;
   errands: Errand[];
+  updates: Notification[];
   used: number;
   limit: number;
   onNew: () => void;
   onSignOut: () => void;
+  onReadUpdate: (id: string) => void;
 };
 
-export function Sidebar({ session, errands, used, limit, onNew, onSignOut }: Props) {
+export function Sidebar({ session, errands, updates, used, limit, onNew, onSignOut, onReadUpdate }: Props) {
   const plus = session.plan === "plus";
   return (
     <div className="flex h-full flex-col gap-5 p-4">
@@ -31,19 +33,49 @@ export function Sidebar({ session, errands, used, limit, onNew, onSignOut }: Pro
         New errand
       </button>
 
-      <nav aria-label="Your errands" className="min-h-0 flex-1 overflow-y-auto">
-        <p className="mb-2 px-2 text-[13px] font-semibold text-muted">Your errands</p>
-        <ul className="space-y-1">
-          {errands.map((e) => (
-            <li key={e.id} className="rounded-xl px-3 py-2 hover:bg-active">
-              <p className="font-medium leading-tight">{e.title}</p>
-              <p className={`text-[13px] ${e.done ? "text-muted" : "text-good font-medium"}`}>
-                {e.note}
-              </p>
-            </li>
-          ))}
-        </ul>
-      </nav>
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto">
+        {updates.length > 0 && (
+          <section aria-label="Updates">
+            <p className="mb-2 px-2 text-[13px] font-semibold text-muted">Updates</p>
+            <ul className="space-y-1">
+              {updates.map((n) => (
+                <li key={n.id}>
+                  <button
+                    onClick={() => onReadUpdate(n.id)}
+                    title="Mark as read"
+                    className="w-full rounded-xl bg-orange-soft px-3 py-2 text-left text-[14px] leading-snug transition-colors hover:bg-active"
+                  >
+                    {n.body}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <nav aria-label="Your errands">
+          <p className="mb-2 px-2 text-[13px] font-semibold text-muted">Booked from here</p>
+          {errands.length === 0 ? (
+            <p className="px-3 text-[14px] text-muted">Nothing yet. Tell me what needs fixing.</p>
+          ) : (
+            <ul className="space-y-1">
+              {errands.map((e) => (
+                <li key={e.id} className="rounded-xl px-3 py-2 hover:bg-active">
+                  <p className="font-medium leading-tight">{e.title}</p>
+                  <p className="text-[13px] font-medium text-good">{e.note}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </nav>
+
+        <Link
+          href="/memories"
+          className="block rounded-xl px-3 py-2 font-medium hover:bg-active"
+        >
+          What I remember
+        </Link>
+      </div>
 
       <div className="rounded-2xl bg-sheet p-3">
         {plus ? (

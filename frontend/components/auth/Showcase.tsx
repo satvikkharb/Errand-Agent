@@ -23,8 +23,8 @@ export function Showcase() {
             <p className="text-[13px] text-muted">4.8 from 212 jobs</p>
           </div>
           <p className="text-right font-semibold">
-            $45
-            <span className="block text-[12px] font-normal text-muted">call-out</span>
+            ₹899
+            <span className="block text-[12px] font-normal text-muted">per visit</span>
           </p>
         </div>
         <p className="mt-3 rounded-lg bg-raised px-3 py-2 text-[14px]">

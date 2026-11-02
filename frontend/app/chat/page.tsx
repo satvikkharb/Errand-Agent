@@ -1,40 +1,68 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { askAgent, type Message } from "@/lib/agent";
+import { api, type ApprovalCard, type Notification } from "@/lib/api";
+import {
+  addItem,
+  ensureUser,
+  recordApproval,
+  recordChat,
+  recordReject,
+  resetChat,
+  setCardState,
+  setChat,
+  setMemoryState,
+  startNewErrand,
+  useChat,
+} from "@/lib/chat";
 import { signOut, useSession } from "@/lib/session";
-import { resetChat, setChat, useChat } from "@/lib/chat";
 import { Sidebar } from "@/components/chat/Sidebar";
 import { ProposalCard } from "@/components/chat/ProposalCard";
+import { MemoryPromptCard } from "@/components/chat/MemoryPrompt";
+import { TraceDialog } from "@/components/chat/TraceDialog";
 import { Composer } from "@/components/chat/Composer";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Orange } from "@/components/Orange";
 
 const FREE_LIMIT = 3;
 
+// Written to match the seeded providers (Indiranagar; plumbers, electricians, AC servicing).
 const STARTERS = [
-  "My kitchen tap won't stop dripping",
-  "AC is blowing warm air",
-  "A socket sparks when I plug things in",
+  "Find a plumber in Indiranagar for my kitchen tap tomorrow morning, under ₹1500",
+  "My AC in Koramangala needs servicing next week",
+  "Fan regulator is broken, I need an electrician in Indiranagar",
 ];
 
-const uid = () => Math.random().toString(36).slice(2, 9);
+const AFFIRM = new Set(["yes", "y", "yep", "ok", "okay", "sure", "approve", "confirm", "book it", "go ahead", "do it", "yes please"]);
+const REJECT = new Set(["no", "n", "nope", "reject", "not this one"]);
+const norm = (s: string) => s.toLowerCase().replace(/[^\w\s]/g, "").trim();
+
+const errText = (e: unknown) => (e instanceof Error ? e.message : "Something went wrong.");
 
 export default function ChatPage() {
   const router = useRouter();
   const { session, ready } = useSession();
+  const chat = useChat();
 
-  const { messages, states, errands } = useChat();
   const [thinking, setThinking] = useState(false);
+  const [working, setWorking] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [trace, setTrace] = useState<string | null>(null);
+  const [updates, setUpdates] = useState<Notification[]>([]);
   const signedIn = !!session;
+  const userId = session?.userId ?? null;
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (ready && !session) router.replace("/login");
   }, [ready, session, router]);
+
+  // Never show one person's thread to another.
+  useEffect(() => {
+    if (userId) ensureUser(userId);
+  }, [userId]);
 
   // Browser back from chat asks first instead of silently dropping the user on /login.
   useEffect(() => {
@@ -48,62 +76,136 @@ export default function ChatPage() {
     return () => window.removeEventListener("popstate", onPop);
   }, [signedIn]);
 
+  // After a reload, a card in the thread may have expired or been replaced: ask the backend.
+  const mine = chat.userId === userId;
+  const sessionId = mine ? chat.sessionId : null;
+  useEffect(() => {
+    if (!userId || !sessionId) return;
+    let live = true;
+    api
+      .session(userId, sessionId)
+      .then((r) => {
+        if (!live) return;
+        for (const i of chat.items) {
+          if (i.kind === "card" && i.state === "pending" && r.approval_card?.approval_id !== i.card.approval_id) {
+            setCardState(i.card.approval_id, "stale");
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // Only on (re)entering a session; later changes arrive through the chat store itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, sessionId]);
+
+  // Things that happened while the user was away (provider cancelled, a slot freed up...).
+  useEffect(() => {
+    if (!userId) return;
+    let live = true;
+    const poll = () =>
+      api
+        .notifications(userId, true)
+        .then((r) => live && setUpdates(r.notifications))
+        .catch(() => {});
+    void poll();
+    const t = setInterval(poll, 30000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [userId]);
+
+  const items = mine ? chat.items : [];
+  const errands = mine ? chat.errands : [];
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, thinking]);
+  }, [items.length, thinking]);
+
+  const closeTrace = useCallback(() => setTrace(null), []);
+
+  const readUpdate = useCallback(
+    (id: string) => {
+      if (!userId) return;
+      setUpdates((u) => u.filter((n) => n.id !== id));
+      void api.readNotification(userId, id).catch(() => {});
+    },
+    [userId],
+  );
 
   if (!ready || !session) return <div className="min-h-screen bg-ground" />;
 
   const plus = session.plan === "plus";
-  const used = errands.filter((e) => !e.done).length; // errands booked and not yet done count against the month
-  const atLimit = !plus && used >= FREE_LIMIT;
+  const atLimit = !plus && errands.length >= FREE_LIMIT;
   const first = session.name.split(" ")[0];
+  const pending = [...items].reverse().find((i) => i.kind === "card" && i.state === "pending");
 
-  const pending = [...messages]
-    .reverse()
-    .find((m) => m.role === "agent" && m.proposal && (states[m.proposal.id] ?? "pending") === "pending");
-
-  // Approving doesn't book yet: the call-out fee is paid on Hippopay first, which then books it.
-  function approve(m: Message) {
-    if (m.role !== "agent" || !m.proposal) return;
-    setChat((s) => ({ ...s, checkout: m.proposal! }));
-    router.push("/hippopay");
+  async function approve(card: ApprovalCard) {
+    if (card.action === "book") {
+      // Booking is paid for first: Hippopay captures, then the backend approval runs the booking.
+      setChat((s) => ({ ...s, checkout: card }));
+      router.push("/hippopay");
+      return;
+    }
+    setWorking(card.approval_id);
+    try {
+      recordApproval(card, await api.approve(session!.userId, card.approval_id));
+    } catch (e) {
+      addItem({ kind: "error", text: errText(e) });
+    } finally {
+      setWorking(null);
+    }
   }
 
-  function decline(id: string) {
-    setChat((s) => ({ ...s, states: { ...s.states, [id]: "declined" } }));
+  async function reject(card: ApprovalCard) {
+    setWorking(card.approval_id);
+    try {
+      recordReject(card, await api.reject(session!.userId, card.approval_id));
+    } catch (e) {
+      addItem({ kind: "error", text: errText(e) });
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function answerMemory(memoryId: string, yes: boolean) {
+    setWorking(memoryId);
+    try {
+      await (yes ? api.confirmMemory : api.rejectMemory)(session!.userId, memoryId);
+      setMemoryState(memoryId, yes ? "yes" : "no");
+    } catch (e) {
+      addItem({ kind: "error", text: errText(e) });
+    } finally {
+      setWorking(null);
+    }
   }
 
   async function send(text: string) {
-    const history = [...messages, { id: uid(), role: "user", text } as Message];
-    setChat((s) => ({ ...s, messages: history }));
+    addItem({ kind: "user", text });
 
-    if (pending && !atLimit && /^(yes|yep|ok|okay|approve|book it|go ahead|sure)\b/i.test(text)) {
-      approve(pending);
-      return;
+    // A bare yes/no answers the open card, exactly like the backend does. Booking still goes via payment.
+    if (pending?.kind === "card") {
+      const n = norm(text);
+      if (AFFIRM.has(n)) {
+        if (atLimit && pending.card.action === "book") {
+          addItem({ kind: "notice", text: "You've used your free errands. Upgrade to book this one." });
+          return;
+        }
+        return void approve(pending.card);
+      }
+      if (REJECT.has(n)) return void reject(pending.card);
     }
 
     setThinking(true);
     try {
-      const reply = await askAgent(text, history);
-      if (/(different|another|later|other time|reschedule)/i.test(text) && pending?.role === "agent") {
-        decline(pending.proposal!.id);
-      }
-      setChat((s) => ({ ...s, messages: [...s.messages, ...reply] }));
+      recordChat(await api.chat(session!.userId, text, chat.sessionId));
+    } catch (e) {
+      addItem({ kind: "error", text: errText(e) });
     } finally {
       setThinking(false);
     }
-  }
-
-  function reschedule(m: Message) {
-    if (m.role !== "agent" || !m.proposal) return;
-    decline(m.proposal.id);
-    void send("Can we try a different time?");
-  }
-
-  function newErrand() {
-    setChat((s) => ({ ...s, messages: [], states: {} }));
-    setDrawer(false);
   }
 
   function logOut() {
@@ -119,10 +221,15 @@ export default function ChatPage() {
     <Sidebar
       session={session}
       errands={errands}
-      used={Math.min(used, FREE_LIMIT)}
+      updates={updates}
+      used={Math.min(errands.length, FREE_LIMIT)}
       limit={FREE_LIMIT}
-      onNew={newErrand}
+      onNew={() => {
+        startNewErrand();
+        setDrawer(false);
+      }}
       onSignOut={() => setLeaving(true)}
+      onReadUpdate={readUpdate}
     />
   );
 
@@ -152,7 +259,7 @@ export default function ChatPage() {
               <path d="M3 5h12M3 9h12M3 13h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
           </button>
-          <p className="font-semibold">{messages.length ? "New errand" : "Errand"}</p>
+          <p className="font-semibold">{items.length ? "New errand" : "Errand"}</p>
           <span className="ml-auto rounded-full bg-raised px-3 py-1 text-[13px] font-medium">
             {plus ? "Plus" : "Free plan"}
           </span>
@@ -160,7 +267,7 @@ export default function ChatPage() {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-8">
           <div className="mx-auto flex min-h-full max-w-[720px] flex-col">
-            {messages.length === 0 ? (
+            {items.length === 0 ? (
               <div className="rise my-auto py-10">
                 <h1 className="text-[40px] font-bold leading-[1.05] tracking-tight sm:text-[52px]">
                   Hi {first}. What needs{" "}
@@ -177,7 +284,7 @@ export default function ChatPage() {
                     <button
                       key={s}
                       onClick={() => void send(s)}
-                      className="rounded-full bg-raised px-4 py-2 text-[14px] font-medium transition-colors hover:bg-orange-soft"
+                      className="rounded-full bg-raised px-4 py-2 text-left text-[14px] font-medium transition-colors hover:bg-orange-soft"
                     >
                       {s}
                     </button>
@@ -186,24 +293,56 @@ export default function ChatPage() {
               </div>
             ) : (
               <ol className="space-y-3 py-6">
-                {messages.map((m) => (
-                  <li key={m.id} className={m.role === "user" ? "flex justify-end" : ""}>
-                    {m.role === "user" ? (
+                {items.map((m) => (
+                  <li key={m.id} className={m.kind === "user" ? "flex justify-end" : ""}>
+                    {m.kind === "user" && (
                       <p className="rise max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-ink px-4 py-2.5 text-white">
                         {m.text}
                       </p>
-                    ) : m.proposal ? (
-                      <ProposalCard
-                        proposal={m.proposal}
-                        state={states[m.proposal.id] ?? "pending"}
-                        atLimit={atLimit}
-                        onApprove={() => approve(m)}
-                        onChange={() => reschedule(m)}
-                      />
-                    ) : (
-                      <p className="rise w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-raised px-4 py-2.5">
+                    )}
+                    {m.kind === "agent" && (
+                      <div className="rise">
+                        <p className="w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-raised px-4 py-2.5">
+                          {m.text}
+                        </p>
+                        {m.runId && (
+                          <button
+                            onClick={() => setTrace(m.runId!)}
+                            className="mt-1 pl-2 text-[12px] text-muted underline decoration-line underline-offset-2 hover:text-ink"
+                          >
+                            How I got there
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {m.kind === "notice" && (
+                      <p className="rise w-fit max-w-[85%] rounded-2xl bg-orange-soft px-4 py-2.5 text-[14px]">
                         {m.text}
                       </p>
+                    )}
+                    {m.kind === "error" && (
+                      <p role="alert" className="rise w-fit max-w-[85%] rounded-2xl bg-bad/10 px-4 py-2.5 text-[14px] text-bad">
+                        {m.text}
+                      </p>
+                    )}
+                    {m.kind === "card" && (
+                      <ProposalCard
+                        card={m.card}
+                        state={m.state}
+                        atLimit={atLimit}
+                        working={working === m.card.approval_id}
+                        onApprove={() => void approve(m.card)}
+                        onReject={() => void reject(m.card)}
+                      />
+                    )}
+                    {m.kind === "memory" && (
+                      <MemoryPromptCard
+                        prompt={m.prompt}
+                        state={m.state}
+                        working={working === m.prompt.memory_id}
+                        onYes={() => void answerMemory(m.prompt.memory_id, true)}
+                        onNo={() => void answerMemory(m.prompt.memory_id, false)}
+                      />
                     )}
                   </li>
                 ))}
@@ -230,6 +369,7 @@ export default function ChatPage() {
       </main>
 
       <ConfirmDialog open={leaving} onCancel={() => setLeaving(false)} onConfirm={logOut} />
+      {trace && <TraceDialog runId={trace} onClose={closeTrace} />}
     </div>
   );
 }

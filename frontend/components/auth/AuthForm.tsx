@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { signIn, useSession } from "@/lib/session";
+import { signIn, useSession, userIdFor } from "@/lib/session";
 import { Orange } from "@/components/Orange";
 import { Field } from "@/components/ui";
 
@@ -43,6 +43,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
             .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
             .join(" "),
         email,
+        userId: userIdFor(email),
         plan: "free",
       });
     }, 500);

@@ -2,14 +2,19 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import type { Proposal } from "@/lib/agent";
-import { completePayment, useChat } from "@/lib/chat";
+import { api, type ApprovalCard } from "@/lib/api";
+import { parseCard, rupees } from "@/lib/cards";
+import { recordApproval, setChat, useChat, type CardState } from "@/lib/chat";
 import { digits, fmtCard, fmtExpiry, validExpiry } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { Field } from "@/components/ui";
 import { Graffiti } from "@/components/Graffiti";
 
 // Hippopay: a make-believe payment provider, styled like a hosted checkout. Nothing is charged.
+//
+// Authorise, then capture: the card is "authorised" when the form is submitted, then the backend
+// approval runs the real booking. Only if the booking comes back DONE is the payment captured
+// (graffiti). Any other outcome releases the authorisation: no charge, and the chat explains why.
 
 function HippoLogo({ light = false }: { light?: boolean }) {
   return (
@@ -21,6 +26,13 @@ function HippoLogo({ light = false }: { light?: boolean }) {
     </span>
   );
 }
+
+type Phase =
+  | { kind: "form" }
+  | { kind: "paying"; step: "Authorising your card..." | "Booking with the provider..." }
+  | { kind: "paid" }
+  | { kind: "held"; message: string }
+  | { kind: "released"; message: string };
 
 export default function HippopayPage() {
   const router = useRouter();
@@ -34,19 +46,24 @@ export default function HippopayPage() {
   const [cvc, setCvc] = useState("");
   const [upi, setUpi] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<"form" | "paying" | "paid">("form");
-  const [paid, setPaid] = useState<Proposal | null>(null);
+  const [phase, setPhase] = useState<Phase>({ kind: "form" });
+  // Kept locally: recordApproval() clears `checkout` from the store, and the receipt still needs it.
+  const [paidFor, setPaidFor] = useState<ApprovalCard | null>(null);
 
   useEffect(() => {
     if (!ready) return;
     if (!session) router.replace("/login");
-    else if (!checkout && !paid) router.replace("/chat");
-  }, [ready, session, checkout, paid, router]);
+    else if (!checkout && !paidFor) router.replace("/chat");
+  }, [ready, session, checkout, paidFor, router]);
 
-  const p = paid ?? checkout;
-  if (!ready || !session || !p) return <div className="min-h-screen bg-hippo-deep" />;
+  const bookingCard = paidFor ?? checkout;
+  if (!ready || !session || !bookingCard) return <div className="min-h-screen bg-hippo-deep" />;
 
-  function pay(e: React.FormEvent) {
+  const b = parseCard(bookingCard);
+  const amount = b.price !== null ? rupees(b.price) : "";
+  const busy = phase.kind === "paying";
+
+  async function pay(e: React.FormEvent) {
     e.preventDefault();
     if (method === "card") {
       if (!holder.trim()) return setError("Add the name on the card.");
@@ -57,18 +74,28 @@ export default function HippopayPage() {
       return setError("That UPI ID should look like name@bank.");
     }
     setError(null);
-    setPhase("paying");
-    const proposal = checkout!;
-    setTimeout(() => {
-      setPaid(proposal);
-      completePayment(proposal);
-      setPhase("paid");
-    }, 1700);
+    const target = bookingCard!;
+    setPaidFor(target);
+
+    setPhase({ kind: "paying", step: "Authorising your card..." });
+    await new Promise((r) => setTimeout(r, 1100)); // pretend bank round trip
+    setPhase({ kind: "paying", step: "Booking with the provider..." });
+
+    try {
+      const res = await api.approve(session!.userId, target.approval_id);
+      const outcome: CardState = recordApproval(target, res);
+      if (outcome === "approved") setPhase({ kind: "paid" });
+      else if (outcome === "processing") setPhase({ kind: "held", message: res.reply });
+      else setPhase({ kind: "released", message: res.reply });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Something went wrong.";
+      // The backend never answered, so the card is still pending in chat and can be retried.
+      setChat((s) => ({ ...s, checkout: target }));
+      setPhase({ kind: "released", message });
+    }
   }
 
-  const amount = `$${p.price.toFixed(2)}`;
-
-  if (phase === "paid") {
+  if (phase.kind === "paid") {
     return (
       <main className="relative grid min-h-screen place-items-center overflow-hidden bg-hippo-deep p-4">
         <Graffiti />
@@ -84,7 +111,7 @@ export default function HippopayPage() {
             <path d="M3 9c30-8 60 6 90-1s60-6 90 0 40 2 54-3" stroke="#ff5b14" strokeWidth="4" strokeLinecap="round" fill="none" className="scribble" />
           </svg>
           <p className="mt-4 text-[15px] text-hippo-deep/70">
-            {amount} paid. {p.provider.split(" ")[0]} is booked for {p.when.toLowerCase()}.
+            {amount} paid. {b.what} is booked for {b.when}.
           </p>
           <button
             onClick={() => router.replace("/chat")}
@@ -92,7 +119,32 @@ export default function HippopayPage() {
           >
             Back to Errand
           </button>
-          <p className="mt-3 text-[12px] text-hippo-deep/50">Hippopay ref HP-{p.id.toUpperCase()}</p>
+          <p className="mt-3 text-[12px] text-hippo-deep/50">Hippopay ref HP-{bookingCard.approval_id.slice(0, 8).toUpperCase()}</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (phase.kind === "held" || phase.kind === "released") {
+    const released = phase.kind === "released";
+    return (
+      <main className="grid min-h-screen place-items-center bg-hippo-deep p-4">
+        <div className="rise w-full max-w-[440px] rounded-3xl bg-white p-8 text-center text-hippo-deep">
+          <h1 className="text-[28px] font-bold leading-tight tracking-tight">
+            {released ? "No charge made" : "Payment on hold"}
+          </h1>
+          <p className="mt-3 text-[15px] text-hippo-deep/70">{phase.message}</p>
+          <p className="mt-3 text-[13px] text-hippo-deep/50">
+            {released
+              ? "Your card authorisation was released. Nothing was booked."
+              : "We'll capture the payment once the provider confirms, and tell you in the chat."}
+          </p>
+          <button
+            onClick={() => router.replace("/chat")}
+            className="mt-6 h-12 w-full rounded-full bg-hippo font-semibold text-white transition-transform hover:-translate-y-0.5"
+          >
+            Back to Errand
+          </button>
         </div>
       </main>
     );
@@ -105,12 +157,10 @@ export default function HippopayPage() {
           <HippoLogo light />
           <div>
             <p className="text-[14px] text-white/75">Paying Errand for</p>
-            <p className="mt-1 text-[20px] font-semibold leading-tight">
-              {p.trade}, {p.provider}
-            </p>
-            <p className="mt-1 text-[14px] text-white/75">{p.when}</p>
+            <p className="mt-1 text-[20px] font-semibold leading-tight">{b.what}</p>
+            <p className="mt-1 text-[14px] text-white/75">{b.when}</p>
             <p className="mt-6 text-[48px] font-bold leading-none">{amount}</p>
-            <p className="mt-1 text-[13px] text-white/75">{p.priceNote}</p>
+            {b.note && <p className="mt-2 text-[13px] text-white">{b.note}</p>}
           </div>
           <p className="text-[13px] text-white/75">
             Demo checkout. No real money moves and nothing is stored.
@@ -186,22 +236,22 @@ export default function HippopayPage() {
 
           <button
             type="submit"
-            disabled={phase === "paying"}
+            disabled={busy}
             className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-hippo font-semibold text-white transition-transform hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-70 disabled:hover:translate-y-0"
           >
-            {phase === "paying" && (
+            {busy && (
               <span
                 className="size-4 rounded-full border-2 border-white/40 border-t-white"
                 style={{ animation: "spin 700ms linear infinite" }}
               />
             )}
-            {phase === "paying" ? "Processing..." : `Pay ${amount}`}
+            {phase.kind === "paying" ? phase.step : `Pay ${amount}`}
           </button>
 
           <button
             type="button"
             onClick={() => router.replace("/chat")}
-            disabled={phase === "paying"}
+            disabled={busy}
             className="w-full text-center text-[14px] font-medium text-hippo-deep/60 hover:text-hippo-deep"
           >
             Cancel and go back

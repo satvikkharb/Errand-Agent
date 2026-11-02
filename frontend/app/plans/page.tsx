@@ -49,7 +49,7 @@ export default function PlansPage() {
           <section className="flex flex-col rounded-3xl bg-sheet p-7">
             <h2 className="text-[20px] font-bold">Pay as you go</h2>
             <p className="mt-4 text-[48px] font-bold leading-none">
-              $0<span className="ml-1 text-[16px] font-medium text-muted">/ month</span>
+              ₹0<span className="ml-1 text-[16px] font-medium text-muted">/ month</span>
             </p>
             <ul className="mt-6 flex-1 space-y-3">
               {FREE.map((f) => (
@@ -67,7 +67,7 @@ export default function PlansPage() {
           <section className="flex flex-col rounded-3xl bg-orange p-7">
             <h2 className="text-[20px] font-bold">Errand Plus</h2>
             <p className="mt-4 text-[48px] font-bold leading-none">
-              $9<span className="ml-1 text-[16px] font-medium text-ink/70">/ month</span>
+              ₹499<span className="ml-1 text-[16px] font-medium text-ink/70">/ month</span>
             </p>
             <ul className="mt-6 flex-1 space-y-3">
               {PLUS.map((f) => (

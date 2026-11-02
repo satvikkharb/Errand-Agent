@@ -122,7 +122,7 @@ export default function CheckoutPage() {
             disabled={phase === "paying"}
             className="h-12 w-full rounded-full bg-orange font-semibold transition-transform hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-60 disabled:hover:translate-y-0"
           >
-            {phase === "paying" ? "Paying..." : "Pay $9.00"}
+            {phase === "paying" ? "Paying..." : "Pay ₹499"}
           </button>
         </form>
 
@@ -131,15 +131,15 @@ export default function CheckoutPage() {
           <dl className="mt-4 space-y-3">
             <div className="flex justify-between gap-4">
               <dt>Errand Plus, monthly</dt>
-              <dd className="font-medium">$9.00</dd>
+              <dd className="font-medium">₹499</dd>
             </div>
             <div className="flex justify-between gap-4 text-muted">
               <dt>Tax</dt>
-              <dd>$0.00</dd>
+              <dd>₹0</dd>
             </div>
             <div className="flex justify-between gap-4 rounded-xl bg-raised px-3 py-2.5 text-[18px] font-bold">
               <dt>Due today</dt>
-              <dd>$9.00</dd>
+              <dd>₹499</dd>
             </div>
           </dl>
           <ul className="mt-6 space-y-1.5 text-[14px] text-muted">
