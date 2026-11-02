@@ -2,6 +2,7 @@
 
 Rows are plain dicts. Datetime fields (start_at, end_at, expires_at, slot_start) are tz-aware datetimes.
 """
+import uuid
 from datetime import datetime
 from typing import Protocol
 
@@ -10,6 +11,7 @@ from app.tools import seed_data
 
 class Store(Protocol):
     def config(self) -> dict | None: ...
+    def areas(self) -> list[str]: ...  # areas we have providers in
     def providers(self, service: str, area: str) -> list[dict]: ...
     def provider(self, pid: str) -> dict | None: ...
     def reviews(self, pid: str) -> list[dict]: ...
@@ -30,6 +32,10 @@ class Store(Protocol):
     def put_idem(self, key: str, tool: str, response: dict) -> None: ...  # first write wins
     def next_attempt(self, name: str) -> int: ...  # returns 0 on first call, then 1, 2, ...
     def add_event(self, type: str, booking_id: str, payload: dict, dedupe_key: str) -> bool: ...
+    def pending_events(self, user_id: str | None = None, limit: int = 20) -> list[dict]: ...
+    def claim_event(self, eid: str, now: datetime) -> bool: ...  # compare-and-set pending -> processing
+    def update_event(self, eid: str, **fields) -> None: ...
+    def requeue_stale_events(self, now: datetime, older_than_s: int = 300) -> int: ...
 
 
 class InMemoryStore:
@@ -49,6 +55,9 @@ class InMemoryStore:
 
     def config(self):
         return dict(self._config) if self._config else None
+
+    def areas(self):
+        return sorted({p["area"] for p in self._providers.values()})
 
     def providers(self, service, area):
         return [dict(p) for p in self._providers.values()
@@ -133,8 +142,36 @@ class InMemoryStore:
     def add_event(self, type, booking_id, payload, dedupe_key):
         if dedupe_key in self._events:
             return False
-        self._events[dedupe_key] = {"type": type, "booking_id": booking_id, "payload": payload}
+        self._events[dedupe_key] = {"id": uuid.uuid4().hex, "type": type, "booking_id": booking_id,
+                                    "payload": dict(payload), "dedupe_key": dedupe_key, "status": "pending",
+                                    "claimed_at": None, "processed_at": None, "run_id": None}
         return True
 
     def events(self):
-        return list(self._events.values())
+        return [dict(e) for e in self._events.values()]
+
+    def _event(self, eid):
+        return next((e for e in self._events.values() if e["id"] == eid), None)
+
+    def pending_events(self, user_id=None, limit=20):
+        rows = [dict(e) for e in self._events.values() if e["status"] == "pending"
+                and (user_id is None or e["payload"].get("user_id") == user_id)]
+        return rows[:limit]
+
+    def claim_event(self, eid, now):
+        e = self._event(eid)
+        if e and e["status"] == "pending":
+            e.update(status="processing", claimed_at=now)
+            return True
+        return False
+
+    def update_event(self, eid, **fields):
+        self._event(eid).update(fields)
+
+    def requeue_stale_events(self, now, older_than_s=300):
+        n = 0
+        for e in self._events.values():
+            if e["status"] == "processing" and e["claimed_at"] and (now - e["claimed_at"]).total_seconds() > older_than_s:
+                e["status"] = "pending"
+                n += 1
+        return n

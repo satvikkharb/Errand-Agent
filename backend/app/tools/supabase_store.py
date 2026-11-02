@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.db import get_db
 
-_DT_FIELDS = ("start_at", "end_at", "expires_at", "slot_start", "created_at")
+_DT_FIELDS = ("start_at", "end_at", "expires_at", "slot_start", "created_at", "updated_at", "decided_at",
+              "consumed_at", "deadline_at", "started_at", "ended_at", "resolved_at", "locked_until",
+              "forgotten_at", "invalidated_at", "read_at", "ts", "claimed_at", "processed_at", "prompted_at")
 
 
 def _read(row: dict | None) -> dict | None:
@@ -20,7 +22,11 @@ class SupabaseStore:
     """Same interface as InMemoryStore, backed by the Supabase tables."""
 
     def __init__(self, db=None):
-        self.db = db or get_db()
+        self._db = db
+
+    @property
+    def db(self):  # resolved per use so each thread gets its own client
+        return self._db or get_db()
 
     def _t(self, name: str):
         return self.db.table(name)
@@ -31,6 +37,9 @@ class SupabaseStore:
 
     def config(self):
         return self._one(self._t("scenario_config").select("*").eq("scenario", "default"))
+
+    def areas(self):
+        return sorted({r["area"] for r in self._t("providers").select("area").execute().data})
 
     def providers(self, service, area):
         return self._t("providers").select("*").eq("service", service).ilike("area", area).execute().data
@@ -119,3 +128,23 @@ class SupabaseStore:
             on_conflict="dedupe_key", ignore_duplicates=True,
         ).execute().data
         return len(rows) > 0
+
+    def pending_events(self, user_id=None, limit=20):
+        q = self._t("events").select("*").eq("status", "pending")
+        if user_id:
+            q = q.filter("payload->>user_id", "eq", user_id)
+        return [_read(r) for r in q.order("created_at").limit(limit).execute().data]
+
+    def claim_event(self, eid, now):
+        rows = (self._t("events").update({"status": "processing", "claimed_at": now.isoformat()})
+                .eq("id", eid).eq("status", "pending").execute().data)
+        return len(rows) > 0  # compare-and-set: only one worker wins
+
+    def update_event(self, eid, **fields):
+        self._t("events").update(_write(fields)).eq("id", eid).execute()
+
+    def requeue_stale_events(self, now, older_than_s=300):
+        cutoff = (now - timedelta(seconds=older_than_s)).isoformat()
+        rows = (self._t("events").update({"status": "pending"}).eq("status", "processing")
+                .lt("claimed_at", cutoff).execute().data)
+        return len(rows)
