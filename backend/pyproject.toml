@@ -7,7 +7,7 @@ dependencies = [
     "uvicorn>=0.30",
     "pydantic-settings>=2.4",
     "supabase>=2.8",
-    "anthropic>=0.40",
+    "openai>=1.50",
 ]
 
 [dependency-groups]
