@@ -2,8 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { signIn } from "@/lib/session";
+import { useEffect, useState } from "react";
+import { signIn, useSession } from "@/lib/session";
+import { Orange } from "@/components/Orange";
 import { Field } from "@/components/ui";
 
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
@@ -11,6 +12,12 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const isSignup = mode === "signup";
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { session } = useSession();
+
+  // Signed-in people have no business on the auth screens.
+  useEffect(() => {
+    if (session) router.replace("/chat");
+  }, [session, router]);
 
   function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -38,14 +45,13 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         email,
         plan: "free",
       });
-      router.push("/chat");
     }, 500);
   }
 
   return (
     <>
       <h1 className="text-[34px] font-bold leading-[1.05] tracking-tight">
-        {isSignup ? "Let's get you set up" : "Welcome back"}
+        {isSignup ? "Let's get you set up" : "Welcome back"} <Orange />
       </h1>
       <p className="mt-2 text-muted">
         {isSignup

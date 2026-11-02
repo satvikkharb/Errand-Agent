@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { Orange } from "@/components/Orange";
 import { TopBar } from "@/components/TopBar";
 import { Field } from "@/components/ui";
 import { setPlan, useSession } from "@/lib/session";
@@ -53,7 +54,7 @@ export default function CheckoutPage() {
         <TopBar />
         <main className="mx-auto max-w-[560px] px-5 pt-16 sm:px-10">
           <h1 className="rise text-[44px] font-bold leading-[1.04] tracking-tight">
-            You&apos;re on Plus.
+            You&apos;re on Plus. <Orange />
           </h1>
           <p className="rise mt-4 text-[17px] text-muted [animation-delay:120ms]">
             Unlimited errands and same-day slots are switched on. Go break something (please don&apos;t).

@@ -63,7 +63,7 @@ export function ProposalCard({ proposal: p, state, atLimit, onApprove, onChange 
             </button>
           </>
         )}
-        {done && <p className="text-[14px] font-semibold text-good">Booked. You&apos;re all set.</p>}
+        {done && <p className="text-[14px] font-semibold text-good">Booked. You&apos;re all set. 🍊</p>}
         {state === "declined" && <p className="text-[14px] text-muted">Passed on this one.</p>}
       </div>
     </div>

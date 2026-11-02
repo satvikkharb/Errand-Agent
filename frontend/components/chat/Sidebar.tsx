@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Orange } from "@/components/Orange";
 import { Logo } from "@/components/Logo";
 import type { Session } from "@/lib/session";
 
@@ -47,7 +48,9 @@ export function Sidebar({ session, errands, used, limit, onNew, onSignOut }: Pro
       <div className="rounded-2xl bg-sheet p-3">
         {plus ? (
           <>
-            <p className="font-semibold">Errand Plus</p>
+            <p className="font-semibold">
+              Errand Plus <Orange />
+            </p>
             <p className="text-[13px] text-muted">Unlimited errands, same-day slots.</p>
           </>
         ) : (

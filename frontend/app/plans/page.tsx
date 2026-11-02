@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
+import { Orange } from "@/components/Orange";
 import { TopBar } from "@/components/TopBar";
 import { useSession } from "@/lib/session";
 
@@ -38,7 +39,7 @@ export default function PlansPage() {
       <TopBar />
       <main className="mx-auto w-full max-w-[920px] px-5 pb-20 pt-8 sm:px-10">
         <h1 className="max-w-[640px] text-[40px] font-bold leading-[1.04] tracking-tight sm:text-[56px]">
-          Fix more, wait less.
+          Fix more, wait less. <Orange />
         </h1>
         <p className="mt-4 max-w-[520px] text-[17px] text-muted">
           Start free. Move to Plus when your home starts asking for more than three favours a month.

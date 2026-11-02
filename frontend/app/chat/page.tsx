@@ -7,6 +7,8 @@ import { signOut, useSession } from "@/lib/session";
 import { Sidebar, type Errand } from "@/components/chat/Sidebar";
 import { ProposalCard, type ProposalState } from "@/components/chat/ProposalCard";
 import { Composer } from "@/components/chat/Composer";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Orange } from "@/components/Orange";
 
 const FREE_LIMIT = 3;
 
@@ -33,11 +35,25 @@ export default function ChatPage() {
   const [errands, setErrands] = useState<Errand[]>(SEED_ERRANDS);
   const [thinking, setThinking] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const signedIn = !!session;
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (ready && !session) router.replace("/login");
   }, [ready, session, router]);
+
+  // Browser back from chat asks first instead of silently dropping the user on /login.
+  useEffect(() => {
+    if (!signedIn) return;
+    history.pushState({ errandGuard: true }, "", location.href);
+    const onPop = () => {
+      history.pushState({ errandGuard: true }, "", location.href);
+      setLeaving(true);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [signedIn]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -67,7 +83,7 @@ export default function ChatPage() {
       {
         id: uid(),
         role: "agent",
-        text: `Done! ${p.provider.split(" ")[0]} is booked for ${p.when.toLowerCase()}. You'll get a nudge an hour before they arrive.`,
+        text: `Done! ${p.provider.split(" ")[0]} is booked for ${p.when.toLowerCase()}. You'll get a nudge an hour before they arrive. 🍊`,
       },
     ]);
   }
@@ -119,7 +135,7 @@ export default function ChatPage() {
       used={Math.min(used, FREE_LIMIT)}
       limit={FREE_LIMIT}
       onNew={newErrand}
-      onSignOut={logOut}
+      onSignOut={() => setLeaving(true)}
     />
   );
 
@@ -160,7 +176,10 @@ export default function ChatPage() {
             {messages.length === 0 ? (
               <div className="rise my-auto py-10">
                 <h1 className="text-[40px] font-bold leading-[1.05] tracking-tight sm:text-[52px]">
-                  Hi {first}. What needs fixing?
+                  Hi {first}. What needs{" "}
+                  <span className="whitespace-nowrap">
+                    fixing? <Orange />
+                  </span>
                 </h1>
                 <p className="mt-3 max-w-[480px] text-muted">
                   Describe it like you would to a friend. I&apos;ll find someone good and check with
@@ -222,6 +241,8 @@ export default function ChatPage() {
 
         <Composer onSend={(t) => void send(t)} disabled={thinking} />
       </main>
+
+      <ConfirmDialog open={leaving} onCancel={() => setLeaving(false)} onConfirm={logOut} />
     </div>
   );
 }
