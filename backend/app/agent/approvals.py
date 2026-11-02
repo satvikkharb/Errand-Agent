@@ -86,6 +86,8 @@ def approve(deps: Deps, approval_id: str, user_id: str) -> dict:
     now = deps.clock.now()
     if now >= a["expires_at"]:
         deps.app.update_approval(approval_id, status="expired", decided_at=now)
+        if a["payload"].get("hold_id"):
+            release_hold(deps, a["payload"]["hold_id"])  # don't leave the slot locked until a later sweep
         return {"ok": False, "error": "approval_expired"}
     if payload_hash(a["payload"]) != a["payload_hash"]:
         deps.app.update_approval(approval_id, status="invalidated", decided_at=now)
@@ -94,6 +96,7 @@ def approve(deps: Deps, approval_id: str, user_id: str) -> dict:
         h = deps.store.hold(a["payload"]["hold_id"])
         if not h or h["status"] != "active" or now >= h["expires_at"]:
             deps.app.update_approval(approval_id, status="expired", decided_at=now)
+            release_hold(deps, a["payload"]["hold_id"])
             return {"ok": False, "error": "hold_expired"}
     deps.app.update_approval(approval_id, status="approved", decided_at=now)
     deps.tracer.span("approval", "approved", input={"approval_id": approval_id, "action": a["action"]})
