@@ -38,4 +38,4 @@ def seed_demo(app: InMemoryAppStore, now: datetime, user_id: str = "user_demo") 
         else:
             app.add_message(SEED_SESSION_ID, "assistant", f"Earlier assistant turn {n}: {_BOT[n % 6]}")
     app.add_summary(user_id, "User booked electrician Amit Electricals (el_02) in Indiranagar for a fan "
-                             "regulator, Rs 1250. Mentioned AC servicing next month.")
+                             "regulator, Rs 1250. Mentioned AC servicing next month.", SEED_SESSION_ID, 60)

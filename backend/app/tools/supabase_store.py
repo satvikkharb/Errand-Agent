@@ -2,7 +2,9 @@ from datetime import datetime
 
 from app.db import get_db
 
-_DT_FIELDS = ("start_at", "end_at", "expires_at", "slot_start", "created_at")
+_DT_FIELDS = ("start_at", "end_at", "expires_at", "slot_start", "created_at", "updated_at", "decided_at",
+              "consumed_at", "deadline_at", "started_at", "ended_at", "resolved_at", "locked_until",
+              "forgotten_at", "invalidated_at", "read_at", "ts")
 
 
 def _read(row: dict | None) -> dict | None:
@@ -20,7 +22,11 @@ class SupabaseStore:
     """Same interface as InMemoryStore, backed by the Supabase tables."""
 
     def __init__(self, db=None):
-        self.db = db or get_db()
+        self._db = db
+
+    @property
+    def db(self):  # resolved per use so each thread gets its own client
+        return self._db or get_db()
 
     def _t(self, name: str):
         return self.db.table(name)

@@ -64,7 +64,7 @@ class InMemoryAppStore:
                 if m["status"] == "active" and m["superseded_by"] is None and m["value"] is not None]
 
     # ---- summaries ----
-    def add_summary(self, user_id: str, text: str) -> None:
+    def add_summary(self, user_id: str, text: str, session_id: str | None = None, covers_up_to_seq: int = 0) -> None:
         self._summaries.append({"id": str(uuid.uuid4()), "user_id": user_id, "text": text, "invalidated_at": None})
 
     def invalidate_summaries(self, user_id: str, now: datetime) -> int:
@@ -103,6 +103,16 @@ class InMemoryAppStore:
     def run(self, run_id: str) -> dict | None:
         r = self._runs.get(run_id)
         return dict(r) if r else None
+
+    def close_stale_runs(self, now: datetime) -> int:
+        """Runs a crashed process left 'running' past their deadline."""
+        n = 0
+        for r in self._runs.values():
+            if r["status"] == "running" and r["deadline_at"] < now:
+                r.update(status="failed", exit_reason="error", ended_at=now,
+                         final_message=r["final_message"] or "interrupted")
+                n += 1
+        return n
 
     def add_span(self, run_id: str, span: dict) -> None:
         rows = self._spans.setdefault(run_id, [])

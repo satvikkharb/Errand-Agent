@@ -271,25 +271,32 @@ class Orchestrator:
             self.app.release_lock(user_id)
 
     # ----------------------------------------------------------------- recovery
-    def _reconcile(self, user_id: str | None, deps: Deps) -> list[str]:
+    def _reconcile(self, user_id: str | None, deps: Deps, lock: bool = False) -> list[str]:
         """Resolve attempts left 'started'/'unknown' by a crash or an unclear outcome. Runs lazily on the next
-        interaction (and from recover()). Returns notices to show the user."""
+        interaction (caller already holds the user lock) and from recover() (lock=True: take it per user, skip
+        users who are mid-request). Returns notices to show the user."""
         notices = []
         for att in self.app.unresolved_attempts(user_id):
             a = self.app.approval(att["approval_id"])
             s = self.app.session(a["session_id"])
-            d = self._deps(s["user_id"], deps.tracer)
-            res = Executor(d, sleep=self.sleep).resume(a, att)
-            if res.outcome != "unknown":
-                body = res.message
-                self.app.add_notification(s["user_id"], s["id"], body, self.clock.now())
-                notices.append(body)
+            if lock and not self.app.acquire_lock(s["user_id"], self.clock.now(), LOCK_TTL_S):
+                continue
+            try:
+                d = self._deps(s["user_id"], deps.tracer)
+                res = Executor(d, sleep=self.sleep).resume(a, att)
+                if res.outcome != "unknown":
+                    self.app.add_notification(s["user_id"], s["id"], res.message, self.clock.now())
+                    notices.append(res.message)
+            finally:
+                if lock:
+                    self.app.release_lock(s["user_id"])
         return notices
 
     def recover(self) -> list[str]:
-        """Process-start hook: finish every unresolved attempt for every user."""
+        """Process-start hook: close runs a crash left open, then finish every unresolved attempt."""
+        self.app.close_stale_runs(self.clock.now())
         run_tracer = type("T", (), {"span": staticmethod(lambda *a, **k: None)})()
-        return self._reconcile(None, Deps(self.app, self.store, None, self.clock, run_tracer))
+        return self._reconcile(None, Deps(self.app, self.store, None, self.clock, run_tracer), lock=True)
 
     def _move_quiet(self, deps: Deps, sid: str, to: str) -> None:
         frm = self.app.session(sid)["state"]

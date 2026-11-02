@@ -12,11 +12,13 @@ from app.agent.app_store import InMemoryAppStore
 from app.agent.context import ContextBuilder
 from app.agent.orchestrator import Orchestrator
 from app.agent.seed import seed_demo
+from app.agent.supabase_app_store import SupabaseAppStore
 from app.clock import IST, FixedClock
 from app.config import get_settings
 from app.llm import OpenAILLM
 from app.tools.config import ScenarioConfig
 from app.tools.store import InMemoryStore
+from app.tools.supabase_store import SupabaseStore
 
 SCENARIOS = {
     "book": ["Find a plumber for my kitchen tap tomorrow morning, under Rs 1500.",
@@ -47,8 +49,11 @@ def main():
     s = get_settings()
     assert s.openai_api_key, "OPENAI_API_KEY missing in backend/.env"
     clock = FixedClock(datetime(2026, 11, 2, 10, 0, tzinfo=IST))
-    store, app = InMemoryStore(), InMemoryAppStore()
-    seed_demo(app, clock.now())
+    if s.state_backend == "supabase":  # real database: reset with scripts/reset_db.sh afterwards
+        store, app = SupabaseStore(), SupabaseAppStore()
+    else:
+        store, app = InMemoryStore(), InMemoryAppStore()
+        seed_demo(app, clock.now())
     cfg = ScenarioConfig.from_row(store.config())
     forced = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "random" else None
     scenario = sys.argv[2] if len(sys.argv) > 2 else "book"
@@ -56,7 +61,7 @@ def main():
     o = Orchestrator(app, store, clock, OpenAILLM(s.openai_api_key, s.openai_model), tools_config=cfg,
                      builder=ContextBuilder(s.context_budget_tokens), sleep=lambda x: None)
     sid, card = None, None
-    print(f"model={s.openai_model}  forced book outcome={cfg.forced_book_outcomes or 'random (seeded)'}\n")
+    print(f"backend={s.state_backend}  model={s.openai_model}  forced book outcome={cfg.forced_book_outcomes or 'random (seeded)'}\n")
     for msg in SCENARIOS[scenario]:
         print(f"USER  > {msg}")
         r = o.handle_message("user_demo", msg, sid)
@@ -72,7 +77,9 @@ def main():
         r = o.approve("user_demo", card["approval_id"])
         print(f"AGENT > {r.reply}   [state={r.state}]")
         show_trace(o, r.run_id)
-        att = list(app._attempts.values())[0]
+        att = next(a for a in (app.unresolved_attempts() + [a for a in getattr(app, "_attempts", {}).values()])
+                   if a["approval_id"] == card["approval_id"]) if s.state_backend != "supabase" else \
+            store.db.table("booking_attempts").select("*").eq("approval_id", card["approval_id"]).execute().data[0]
         print(f"\nattempt: status={att['status']} retries={att['retry_count']} key={att['idempotency_key'][:18]}…")
         print("bookings for user:", len(store.bookings_for_user("user_demo")), "(was 5)")
 
