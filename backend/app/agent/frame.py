@@ -64,14 +64,17 @@ def apply_updates(frame: dict, updates: dict, clear: list[str]) -> tuple[dict, l
     return new, changed
 
 
-def slot_in_window(slot: dict, frame: dict) -> bool:
-    """slot has ISO 'start'/'end'. The whole slot must fit inside the user's time window."""
+def slot_in_window(slot: dict, frame: dict, check_window: bool = True) -> bool:
+    """slot has ISO 'start'/'end'. Inside the requested dates, and (unless check_window=False) wholly inside
+    the user's time window."""
     start = datetime.fromisoformat(slot["start"]).astimezone(IST)
     end = datetime.fromisoformat(slot["end"]).astimezone(IST)
     if frame.get("date_start") and start.date().isoformat() < frame["date_start"]:
         return False
     if frame.get("date_end") and start.date().isoformat() > frame["date_end"]:
         return False
+    if not check_window:
+        return True
     if frame.get("window_start") and start.strftime("%H:%M") < frame["window_start"]:
         return False
     if frame.get("window_end") and end.strftime("%H:%M") > frame["window_end"]:

@@ -276,3 +276,25 @@ def test_model_titling_waits_for_a_real_message_so_a_greeting_chat_is_not_named_
     r2 = h.o.handle_message("user_demo", "Move my AC servicing to Saturday", r.session_id)
     assert r2.title == "AC servicing on Saturday"
     assert h.o.list_conversations("user_demo")[0]["title_source"] == "llm"
+
+
+def test_unexpected_failures_come_back_as_json_the_frontend_can_show(monkeypatch):
+    import httpx
+    import app.main as main
+    h = H()
+    monkeypatch.setattr(main, "get_orchestrator", lambda: h.o)
+    c = TestClient(main.app, raise_server_exceptions=False)
+
+    def network_down(*a, **k):
+        raise httpx.ConnectError("nodename nor servname provided, or not known")
+
+    def bug(*a, **k):
+        raise ValueError("boom")
+    monkeypatch.setattr(h.o, "handle_message", network_down)
+    r = c.post("/chat", json={"user_id": "user_demo", "message": "hi"})
+    assert r.status_code == 503 and r.headers["content-type"].startswith("application/json")
+    assert r.json()["retryable"] is True and "temporarily unreachable" in r.json()["detail"]
+    monkeypatch.setattr(h.o, "handle_message", bug)
+    r = c.post("/chat", json={"user_id": "user_demo", "message": "hi"})
+    assert r.status_code == 500 and r.json() == {"detail": "Something went wrong on our side.", "retryable": False}
+    assert "boom" not in r.text  # internals are never leaked

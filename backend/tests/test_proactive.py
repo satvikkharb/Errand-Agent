@@ -29,7 +29,7 @@ def mem(h, key, value, kind="explicit", status="active"):
                       "created_at": NOW, "updated_at": NOW})
 
 
-def block(h, provider, day=DAY, hours=("09", "11", "14", "16")):
+def block(h, provider, day=DAY, hours=("09", "11", "14", "16", "18")):
     for hh in hours:
         h.store.set_slot_status(f"{provider}_{day}_{hh}", "booked")
 

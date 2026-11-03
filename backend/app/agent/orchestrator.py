@@ -17,9 +17,11 @@ from app.agent.deps import Deps
 from app.agent.executor import Executor
 from app.agent.gateway import GatewayContext, ToolGateway, tool_specs
 from app.agent.memory import MemoryService
+from app.agent.options import build_options
 from app.agent.proactive import ProactiveProcessor
 from app.agent.sanitize import clean_text
 from app.agent.summarizer import Summarizer
+from app.agent.timefmt import when
 from app.agent.titles import HistoryService, TitleService
 from app.agent.tokens import count_tokens
 from app.agent.trace import AppTracer
@@ -74,6 +76,7 @@ class ChatResult:
     busy: bool = False
     memory_prompt: dict | None = None  # "Want me to remember X?" with Yes/No buttons
     title: str | None = None  # the conversation's current title, so the sidebar can update at once
+    options: dict | None = None  # the provider table (every match with ALL its slots) when a search just ran
 
 
 def _norm(s: str) -> str:
@@ -134,10 +137,15 @@ class Orchestrator:
         a = self.app.approval(s["pending_approval_id"]) if s["pending_approval_id"] else None
         return approvals.render_card(a) if a and a["status"] == "pending" else None
 
-    def _result(self, session_id, reply, run, exit_reason, views=(), notices=(), memory_prompt=None):
+    def _result(self, session_id, reply, run, exit_reason, views=(), notices=(), memory_prompt=None, options=None):
         s = self.app.session(session_id)
         return ChatResult(session_id, reply, s["state"], run["id"], exit_reason, self._card(session_id),
-                          list(views), list(notices), memory_prompt=memory_prompt, title=s.get("title"))
+                          list(views), list(notices), memory_prompt=memory_prompt, title=s.get("title"), options=options)
+
+    def _options(self, session_id: str) -> dict | None:
+        s = self.app.session(session_id)
+        pending = self.app.approval(s["pending_approval_id"]) if s["pending_approval_id"] else None
+        return build_options(s["request_frame"], pending)
 
     def _provider_name(self, pid: str) -> str | None:
         p = self.store.provider(pid)
@@ -172,6 +180,7 @@ class Orchestrator:
         budget = RunBudget(self.clock, self.max_turns, self.max_tool_calls, timeout_s=self.timeout_s)
         views: list = []
         prompt = None
+        searched_before = (self.app.session(sid)["request_frame"].get("_search") or {}).get("search_id")
         try:
             typed = self._typed_decision(deps, sid, user_id, message)
             if typed is not None:
@@ -190,7 +199,9 @@ class Orchestrator:
         if prompt:
             reply = f"{reply}\n\n{prompt['text']}"
         self._close_run(run, sid, reply, exit_reason, budget, tracer)
-        return self._result(sid, reply, run, exit_reason, views, notices, prompt)
+        searched_now = (self.app.session(sid)["request_frame"].get("_search") or {}).get("search_id")
+        options = self._options(sid) if searched_now and searched_now != searched_before else None  # a NEW search this turn
+        return self._result(sid, reply, run, exit_reason, views, notices, prompt, options)
 
     def _typed_decision(self, deps: Deps, sid: str, user_id: str, message: str) -> tuple[str, dict | None] | None:
         """A bare yes/no answers the ONE open question: a pending approval card, else a 'remember this?' prompt.
@@ -410,7 +421,42 @@ class Orchestrator:
                                  "created_at": s.get("created_at"), "message_count": len(msgs),
                                  "last_message_at": msgs[-1].get("created_at") if msgs else None,
                                  "has_pending_approval": card is not None},
-                "messages": msgs, "approval_card": card}
+                "messages": msgs, "approval_card": card, "options": self._options(session_id)}
+
+    def select_slot(self, user_id: str, session_id: str, provider_id: str, slot_id: str) -> ChatResult:
+        """The user tapped a slot bubble. Straight to the approval card: no model, no second confirmation.
+        The same rules apply as for a typed request (the slot must come from the saved search; the hold decides the price)."""
+        s = self.app.session(session_id)
+        if not s or s["user_id"] != user_id or s.get("deleted_at"):
+            return ChatResult(None, "I can't find that conversation.", None, exit_reason="not_found")
+        if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
+            return ChatResult(session_id, MSG_BUSY, s["state"], exit_reason="busy", busy=True)
+        try:
+            run, tracer = self._open_run(session_id)
+            deps = self._deps(user_id, tracer)
+            found = s["request_frame"].get("_search") or {}
+            name = found.get("names", {}).get(provider_id, "that provider")
+            label = when(found["times"][slot_id], found.get("ends", {}).get(slot_id)) if slot_id in found.get("times", {}) else "that slot"
+            said = f"I'll take {name}, {label}"
+            self.app.add_message(session_id, "user", said, run["id"])
+            budget = RunBudget(self.clock, 1, self.max_tool_calls, timeout_s=self.timeout_s)
+            try:
+                gw = ToolGateway(deps, GatewayContext(session_id, user_id, said, auto_search=False), budget)
+                out = gw.call("propose_book", {"provider_id": provider_id, "slot_id": slot_id})
+                if out.ends_turn:
+                    reply = PROPOSAL_TEXT["book"]
+                elif out.model_view.get("status") == "price_too_different":
+                    reply = (f"The final price came out far above the listed ₹{out.model_view['listed_price']}, "
+                             "so I didn't hold it. Please pick another option.")
+                else:  # the slot went, or the list was out of date: refresh it so they can pick again
+                    gw.call("search_providers", {})
+                    reply = "That slot is no longer available, so I've refreshed the list. Please pick another."
+            except BudgetExceeded:
+                reply = MSG_LIMIT
+            self._close_run(run, session_id, reply, "done", budget)
+            return self._result(session_id, reply, run, "done", options=self._options(session_id))
+        finally:
+            self.app.release_lock(user_id)
 
     def rename_conversation(self, user_id: str, session_id: str, title: str) -> str:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):

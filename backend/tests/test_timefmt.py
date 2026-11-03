@@ -29,6 +29,7 @@ def test_when_day_and_windows():
     assert human_day(t(9, d=2)) == "Mon 2 Nov"  # no leading zero on the day
     assert hhmm_text("14:00") == "2 pm" and hhmm_text("09:30") == "9:30 am"
     assert window_text("14:00", "18:00") == "2 pm to 6 pm" and window_text("14:00", None) == "after 2 pm"
+    assert window_text("18:00", "23:59") == "after 6 pm" and window_text(None, "23:59") is None  # end of day = open
     assert window_text(None, "12:00") == "before 12 pm" and window_text(None, None, True) == "any time" and window_text(None, None) is None
     assert date_text("2026-11-02", "2026-11-02") == "Mon 2 Nov" and date_text("2026-11-04", "2026-11-06") == "Wed 4 Nov to Fri 6 Nov"
 

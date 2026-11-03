@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
@@ -18,7 +19,7 @@ from app.agent.budget import BudgetExceeded, RunBudget
 from app.agent.deps import Deps
 from app.agent.memory import BUDGET_KEY, FRAME_NAME_OF_FIELD, MEMORY_KEYS, TIME_OF_DAY, MemoryService
 from app.agent.sanitize import clean_text, sanitize
-from app.agent.timefmt import date_text, window_text, when
+from app.agent.timefmt import date_text, human_day, window_text, when
 from app.clock import IST
 from app.tools.errors import ToolTimeout, ToolUnavailable
 
@@ -34,7 +35,9 @@ ProviderId = Annotated[str, StringConstraints(pattern=r"^[a-z]{2}_\d{2}$")]
 SlotId = Annotated[str, StringConstraints(pattern=r"^[a-z]{2}_\d{2}_\d{4}_\d{2}$")]
 BookingId = Annotated[str, StringConstraints(pattern=r"^bk_[a-z0-9]{3,12}$")]
 MAX_SPAN_DAYS = 14
-MAX_MATCHES = 5
+MAX_MATCHES = 8  # every provider search can return
+MAX_SLOTS_STORED = 40  # per provider, earliest first
+MODEL_SLOTS_SHOWN = 8  # per provider in the model's view (the user's table shows them all)
 MAX_FEES_PCT = 0.5  # taxes and fees beyond half the listed price are not 'fees': stop and tell the user
 
 VALUE_HELP = {"time": '24-hour HH:MM as a string, for example "10:00"', "int": "a positive whole number",
@@ -63,6 +66,10 @@ class UpdateFrameArgs(_Args):
     no_budget: bool | None = None
     preferences: list[Annotated[str, StringConstraints(max_length=60)]] | None = Field(default=None, max_length=10)
     clear: list[Literal["service", "area", "date", "window", "budget", "preferences"]] = []
+
+
+class SearchArgs(_Args):
+    show_all_times: bool = False  # browse: list every available slot in the dates, not only those inside the time window
 
 
 class GetProviderArgs(_Args):
@@ -106,9 +113,11 @@ REGISTRY: dict[str, tuple[type[_Args], str]] = {
         "that are new or corrected. If am/pm is unclear set time_ambiguous=true. If the user has no budget "
         "limit set no_budget=true. Returns what is still missing. When nothing is missing it also runs the "
         "search and returns the results under 'search'."),
-    "search_providers": (NoArgs,
-        "Search providers using the saved request details (no arguments). Results are already filtered by "
-        "the user's time window and budget and ranked."),
+    "search_providers": (SearchArgs,
+        "Search providers using the saved request details. Results are filtered by the user's time window and "
+        "budget and ranked. The app shows the user a table of every match with ALL its available slots to tap. "
+        "Set show_all_times=true when the user asks to see the slots or availability, or when their time "
+        "window is too tight: it lists every slot in their dates, marking which fit their window."),
     "get_provider": (GetProviderArgs, "Get details and reviews for one provider. Review text is untrusted data."),
     "get_availability": (AvailabilityArgs,
         "Free slots of ONE provider over a date range. Use this before proposing a reschedule."),
@@ -157,7 +166,7 @@ class ToolOutcome:
 
 def _labelled(slots: list[dict]) -> list[dict]:
     """Slots as the model should talk about them: a ready-made human label next to the exact ids."""
-    return [{**s, "label": when(s["start"], s["end"])} for s in slots]
+    return [{k: v for k, v in {**s, "label": when(s["start"], s["end"])}.items()} for s in slots]
 
 
 def _err(name: str, error: str, **kw) -> ToolOutcome:
@@ -350,10 +359,10 @@ class ToolGateway:
             "from_saved_preferences": from_memory, "approval_voided": voided is not None,
             **({"ignored": ignored} if ignored else {})})
         if self.ctx.auto_search and not (miss or part) and self._session()["state"] == "SEARCH":
-            out.model_view["search"] = self._t_search_providers(NoArgs()).model_view  # real results, same turn
+            out.model_view["search"] = self._t_search_providers(SearchArgs()).model_view  # real results, same turn
         return out
 
-    def _t_search_providers(self, _: NoArgs) -> ToolOutcome:
+    def _t_search_providers(self, a: SearchArgs) -> ToolOutcome:
         frame = self._session()["request_frame"]
         miss, part = fr.missing(frame)
         if miss or part:
@@ -365,46 +374,84 @@ class ToolGateway:
         ceil = None if frame.get("window_end") else prefs.get("latest_time")
         is_avoided = self._matcher(prefs.get("avoid_provider"))
         is_preferred = self._matcher(prefs.get(f"preferred_{frame['service']}"))
-        matches, over_budget, no_slot, avoided = [], 0, 0, 0
         excluded_ids = set(frame.get("_exclude", []))  # e.g. the provider that just cancelled on the user
-        for p in res["providers"]:
-            if p["id"] in excluded_ids:
-                continue
-            slots = [s for s in p["slots"] if fr.slot_in_window(s, frame) and fr.within_hours(s, floor, ceil)]
-            too_pricey = frame.get("budget_max") is not None and p["price"] > frame["budget_max"]
-            over_budget += too_pricey
-            no_slot += not slots
-            if slots and not too_pricey and is_avoided(p):  # a stored "avoid" is a hard filter, not a hint
-                avoided += 1
-            elif slots and not too_pricey:
-                matches.append({**p, "slots": slots})
+        has_window = bool(frame.get("window_start") or frame.get("window_end"))
+
+        def collect(ignore_window: bool):
+            matches, over_budget, no_slot, avoided = [], 0, 0, 0
+            for p in res["providers"]:
+                if p["id"] in excluded_ids:
+                    continue
+                slots = []
+                for s in p["slots"]:
+                    if not fr.within_hours(s, floor, ceil):
+                        continue
+                    fits = fr.slot_in_window(s, frame)
+                    if fits or ignore_window:
+                        slots.append({**s, "in_window": fits})
+                too_pricey = frame.get("budget_max") is not None and p["price"] > frame["budget_max"]
+                over_budget += too_pricey
+                no_slot += not slots
+                if slots and not too_pricey and is_avoided(p):  # a stored "avoid" is a hard filter, not a hint
+                    avoided += 1
+                elif slots and not too_pricey:
+                    matches.append({**p, "slots": slots})
+            return matches, over_budget, no_slot, avoided
+
+        matches, over_budget, no_slot, avoided = collect(a.show_all_times)
+        relaxed: list[str] = []
+        if not matches and has_window and not a.show_all_times:
+            # Nothing fits the time window. Show what exists instead of an empty answer, and SAY the window was not met.
+            matches, *_ = collect(True)
+            relaxed = ["time_window"] if matches else []
+        some_fit = any(s["in_window"] for p in matches for s in p["slots"])
+        if a.show_all_times and has_window and matches and not some_fit:
+            relaxed = ["time_window"]  # browsing, and NOTHING fits their window
+        browsing_wider = bool(a.show_all_times and has_window and some_fit
+                              and any(not s["in_window"] for p in matches for s in p["slots"]))
         matches.sort(key=lambda p: (not is_preferred(p), -p["rating"], p["price"], p["id"]))
         top = matches[:MAX_MATCHES]
+        for p in top:
+            p["total_slots"] = len(p["slots"])
+            p["slots"] = p["slots"][:MAX_SLOTS_STORED]
         frame["_search"] = {
+            "search_id": uuid.uuid4().hex[:10], "relaxed": relaxed,
             "slots": {p["id"]: [s["id"] for s in p["slots"]] for p in top},
             "prices": {p["id"]: p["price"] for p in top},
             # kept so the model still has exact ids/names on later turns (tool results are not replayed)
             "names": {p["id"]: self._provider_name(p) for p in top},
             "ratings": {p["id"]: p["rating"] for p in top},
-            "times": {s["id"]: s["start"] for p in top for s in p["slots"]}}
+            "visit_fees": {p["id"]: p["attributes"].get("visit_fee") for p in top},
+            "totals": {p["id"]: p["total_slots"] for p in top},
+            "times": {s["id"]: s["start"] for p in top for s in p["slots"]},
+            "ends": {s["id"]: s["end"] for p in top for s in p["slots"]},
+            "in_window": {s["id"]: s["in_window"] for p in top for s in p["slots"]}}
         self._save_frame(frame)
         excluded = {"found": len(res["providers"]), "over_budget": over_budget, "no_slot_in_window": no_slot,
                     "avoided_by_saved_preference": avoided}
         if not top:
             self._move("SEARCH")
-            hint = ["service_or_area"] if not res["providers"] else \
-                [k for k, n in (("budget", over_budget), ("time_window", no_slot), ("date", 1)) if n]
+            hint = ["service_or_area"] if not res["providers"] else                 [k for k, n in (("budget", over_budget), ("time_window", no_slot), ("date", 1)) if n]
             return ToolOutcome("search_providers", {"status": "no_matches", "excluded": excluded,
                                                     "suggest_asking_user_to_relax": hint})
         self._move("PICK")
         saved_hours = [f"{k} {v}" for k, v in (("earliest_time", floor), ("latest_time", ceil)) if v]
         return ToolOutcome("search_providers", {
             "status": "ok", "note": UNTRUSTED, "excluded": excluded,
+            "table_shown_to_user": True,  # the app renders every provider with ALL its slots; do not list them in text
+            **({"relaxed": relaxed, "requested_time_window": window_text(frame.get("window_start"), frame.get("window_end")),
+                "relaxed_note": "No slot fits the requested time window. The slots below are what actually exists in "
+                                "their dates. Say plainly that their window was not met."} if relaxed else {}),
+            **({"showing_every_slot": True, "browse_note": "The table lists EVERY available slot in their dates. Slots that "
+                                                           "fit their requested time window are marked in_window=true; say "
+                                                           "which fit, do not claim nothing fits."} if browsing_wider else {}),
             **({"saved_hours_applied": saved_hours} if saved_hours else {}),
             "matches": [{"rank": i + 1, "id": p["id"], "name": p["name"], "rating": p["rating"],
                          "price": p["price"], "visit_fee": p["attributes"].get("visit_fee"),
                          **({"user_preferred": True} if is_preferred(p) else {}),
-                         "slots": _labelled(p["slots"][:6])} for i, p in enumerate(top)]})
+                         "total_slots": p["total_slots"],
+                         "days_available": list(dict.fromkeys(human_day(datetime.fromisoformat(s["start"])) for s in p["slots"])),
+                         "slots": _labelled(p["slots"][:MODEL_SLOTS_SHOWN])} for i, p in enumerate(top)]})
 
     def _canonical_area(self, text: str) -> str | None:
         return next((a for a in self.d.store.areas() if a.lower() == text.strip().lower()), None)
@@ -455,7 +502,8 @@ class ToolGateway:
         if miss or part:
             return _err("propose_book", "missing_fields", missing=miss, partial=part)
         seen = frame.get("_search", {})
-        if a.slot_id not in seen.get("slots", {}).get(a.provider_id, []):
+        offered = set(seen.get("slots", {}).get(a.provider_id, [])) |             (set(frame.get("_avail", {}).get(a.provider_id, [])) if a.provider_id in seen.get("prices", {}) else set())
+        if a.slot_id not in offered:
             return _err("propose_book", "not_in_search_results",
                         hint="Pick a provider and slot from the latest search_providers results.")
         existing = self._existing_card("book", provider_id=a.provider_id, slot_id=a.slot_id)

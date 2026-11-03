@@ -8,7 +8,7 @@ from app.clock import IST, FixedClock, OffsetClock, SystemClock
 from app.config import Settings
 from app.container import make_clock
 from app.tools.config import ScenarioConfig
-from app.tools.day_schedule import DAYS, day_scenario
+from app.tools.day_schedule import WEEK, day_scenario
 from app.tools.errors import ToolTimeout
 from app.tools.provider_tools import ProviderTools
 from app.tools.store import InMemoryStore
@@ -34,11 +34,21 @@ def free_slot(store, day: str, service="plumber", area="Indiranagar"):
 
 
 # ================================================================ each day is its own situation
-def test_the_calendar_is_fixed_and_every_seeded_day_has_a_distinct_purpose():
-    assert [d.isoformat() for d in DAYS] == [D(n) for n in range(2, 10)]
-    assert [s.key for s in DAYS.values()] == ["happy", "timeout-after-success", "slot-taken", "price-differs",
-                                              "timeout-then-retry", "reschedule-conflict", "never-confirms", "happy-again"]
-    assert day_scenario(date(2027, 1, 1)).key == "happy"  # outside the seeded calendar: just works
+def test_the_week_cycle_is_fixed_and_repeats_every_week():
+    assert [w.key for w in WEEK] == ["happy", "timeout-after-success", "slot-taken", "price-differs",
+                                     "timeout-then-retry", "reschedule-conflict", "never-confirms"]
+    for n in range(2, 17):  # 2 Nov 2026 is a Monday: every date follows its weekday
+        assert day_scenario(date(2026, 11, n)) is WEEK[(n - 2) % 7]
+    assert day_scenario(date(2026, 11, 9)).key == "happy" and day_scenario(date(2026, 11, 10)).key == "timeout-after-success"
+    assert day_scenario(date(2026, 11, 14)).reschedule_conflict  # next Saturday conflicts too
+
+
+def test_next_weeks_days_behave_like_this_weeks():
+    t, store = tools()
+    p, s = free_slot(store, D(11))  # next Wednesday: slot taken, like Wed 4 Nov
+    assert t.book(t.hold_slot(p["id"], s["id"])["hold_id"], "k")["status"] == "slot_taken"
+    p, s = free_slot(store, D(12))  # next Thursday: quote Rs 250 higher
+    assert t.hold_slot(p["id"], s["id"])["quoted_price"] == p["base_price"] + 250
 
 
 def test_today_is_the_happy_flow():
@@ -182,4 +192,4 @@ def test_today_has_slots_so_anytime_after_2pm_today_finds_something():
     store = InMemoryStore()
     res = ProviderTools(store, FixedClock(NOW)).search_providers("plumber", "Koramangala", {"start": D(2), "end": D(2)})["providers"]
     starts = {s["start"][11:16] for p in res for s in p["slots"]}
-    assert starts and starts <= {"11:00", "14:00", "16:00"}  # nothing already in the past (the 09:00 slots)
+    assert starts and starts <= {"11:00", "14:00", "16:00", "18:00"}  # nothing already in the past (the 09:00 slots)

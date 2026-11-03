@@ -3,14 +3,29 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query
+import logging
+
+import httpx
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.container import get_orchestrator
 from app.tools.sim import provider_cancels
 
+log = logging.getLogger(__name__)
 app = FastAPI(title="Errand Agent")
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request: Request, exc: Exception):
+    """Never hand the frontend a bare text 500. A network or storage outage is a 503 it can show and retry."""
+    log.exception("unhandled error on %s %s", request.method, request.url.path)
+    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
+        return JSONResponse(status_code=503, content={"detail": "A service the app depends on is temporarily unreachable. "
+                                                              "Please try again in a moment.", "retryable": True})
+    return JSONResponse(status_code=500, content={"detail": "Something went wrong on our side.", "retryable": False})
 
 
 class ChatIn(BaseModel):
@@ -227,3 +242,15 @@ def delete_conversation(conversation_id: str, user_id: str):
     if status == "busy":
         raise HTTPException(409, "busy with another request, try again")
     return {"ok": True}
+
+
+class SelectIn(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    provider_id: str = Field(min_length=1, max_length=40)
+    slot_id: str = Field(min_length=1, max_length=40)
+
+
+@app.post("/conversations/{conversation_id}/select")
+def select_slot(conversation_id: str, body: SelectIn):
+    """The user tapped a slot bubble in the provider table. Returns the approval card (or a refreshed table)."""
+    return asdict(_orch().select_slot(body.user_id, conversation_id, body.provider_id, body.slot_id))
