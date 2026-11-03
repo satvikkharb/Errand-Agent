@@ -30,8 +30,16 @@ class OffsetClock:
     """Starts at a chosen instant (the day the data was seeded for) and then runs in real time, so
     "today" stays on the seeded calendar while holds still expire after 10 real minutes."""
 
-    def __init__(self, start: datetime):
-        self._start, self._t0 = start, datetime.now(timezone.utc)
+    def __init__(self, start: datetime, anchor: datetime | None = None, loop_hours: float | None = None, now_fn=None):
+        """anchor: the real instant that counts as `start`. Without it the clock starts when THIS process starts, which is
+        right locally but wrong on serverless, where every cold instance would restart "today". With a fixed anchor every
+        instance computes the same time. loop_hours: wrap back to `start` after that many hours, so a deployed demo stays
+        on the seeded Monday instead of drifting to Tuesday (which would change what a booking does)."""
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._start, self._t0, self._loop = start, anchor or self._now_fn(), loop_hours
 
     def now(self) -> datetime:
-        return self._start + (datetime.now(timezone.utc) - self._t0)
+        elapsed = self._now_fn() - self._t0
+        if self._loop:
+            elapsed = elapsed % timedelta(hours=self._loop)
+        return self._start + elapsed

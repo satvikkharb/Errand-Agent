@@ -309,10 +309,10 @@ _pg: PgDB | None = None
 _pg_lock = threading.Lock()
 
 
-def get_pg(dsn: str) -> PgDB:
+def get_pg(dsn: str, min_size: int = 2, max_size: int = 12) -> PgDB:
     global _pg
     if _pg is None:
         with _pg_lock:
             if _pg is None:
-                _pg = PgDB(dsn)
+                _pg = PgDB(dsn, min_size=min_size, max_size=max_size)
     return _pg

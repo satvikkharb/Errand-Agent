@@ -40,8 +40,8 @@ def _now() -> datetime:
 class Telemetry:
     """Holds the LangSmith client and settings. Create runs with start()."""
 
-    def __init__(self, client: Any, project: str = "errand-agent", send_prompts: bool = True):
-        self.client, self.project, self.send_prompts = client, project, send_prompts
+    def __init__(self, client: Any, project: str = "errand-agent", send_prompts: bool = True, flush_wait_s: float = 0.0):
+        self.client, self.project, self.send_prompts, self.flush_wait_s = client, project, send_prompts, flush_wait_s
         self._project_id: str | None = None
         self._threads: list[threading.Thread] = []
 
@@ -80,7 +80,7 @@ class Telemetry:
         client = Client(api_url=s.langsmith_endpoint, api_key=s.langsmith_api_key,
                         workspace_id=s.langsmith_workspace_id or None,
                         tracing_error_callback=lambda e: log.warning("LangSmith tracing error: %s", e))
-        return cls(client, s.langsmith_project, s.langsmith_send_prompts)
+        return cls(client, s.langsmith_project, s.langsmith_send_prompts, s.langsmith_flush_wait_s)
 
     def wrap(self, app_tracer, *, name: str, run_id: str, session_id: str, user_id: str | None, inputs: dict):
         """The tracer the rest of the code uses: it writes spans to our database AND to LangSmith."""
@@ -168,6 +168,8 @@ class RunTrace:
             self.root.end(outputs=_clip(outputs), error=error)
             self.root.patch()
             self.tel.background(lambda: self._send(outcome))
+            if self.tel.flush_wait_s:  # serverless: the process can freeze the moment we reply, so let the send finish first
+                self.tel.drain(self.tel.flush_wait_s)
         except Exception:
             log.warning("LangSmith: could not finish a trace", exc_info=True)
 

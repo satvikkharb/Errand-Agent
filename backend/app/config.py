@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     langsmith_project: str = "errand-agent"
     langsmith_endpoint: str = "https://api.smith.langchain.com"  # EU accounts: https://eu.api.smith.langchain.com
     langsmith_workspace_id: str = ""  # only for organization-scoped keys
+    langsmith_flush_wait_s: float = 0.0  # >0: wait this long for the trace to be sent before replying (serverless freezes after)
     langsmith_send_prompts: bool = True  # false: send timings, tokens and tool names, but not prompt/reply text
     state_backend: str = "memory"  # memory | supabase
     cron_secret: str = ""  # Authorization: Bearer <this> on /internal/tick (Vercel Cron sends it)
@@ -27,6 +28,10 @@ class Settings(BaseSettings):
     # from 10:00 IST. SIM_NOW=system uses the machine clock; SIM_FREEZE=true stops the clock (holds never expire).
     sim_now: str = "2026-11-02T10:00:00+05:30"
     sim_freeze: bool = False
+    sim_anchor: str = ""  # real instant (ISO) that counts as SIM_NOW; set it when deployed so every instance agrees
+    sim_loop_hours: float = 0.0  # >0: wrap the simulated clock back to SIM_NOW after this many hours (keeps "today" = Monday)
+    db_pool_min: int = 2  # connection pool per process; keep small on serverless (many instances share the database)
+    db_pool_max: int = 12
     context_budget_tokens: int = 6000
     price_in_per_1m: float = 0.40  # USD per 1M tokens; estimate, set to your model's real price
     price_out_per_1m: float = 1.60

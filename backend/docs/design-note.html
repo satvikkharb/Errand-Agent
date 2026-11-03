@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Errand Agent Design Note</title>
+<style>
+  @page { size: A4; margin: 11mm 13mm; }
+  * { box-sizing: border-box; }
+  body { font: 9.1pt/1.38 -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1c1c1c; margin: 0; }
+  h1 { font-size: 16.5pt; margin: 0 0 1px; letter-spacing: -.2px; }
+  .tag { color: #555; margin: 0 0 5px; font-style: italic; }
+  h2 { font-size: 10pt; margin: 7px 0 2px; padding-bottom: 1px; border-bottom: .6px solid #d9d9d9; }
+  p { margin: 0 0 2px; text-align: justify; hyphens: auto; }
+  code { font: 8.3pt ui-monospace, Menlo, monospace; background: #f3f3f1; padding: 0 2px; border-radius: 2px; }
+  pre { font: 7.5pt/1.35 ui-monospace, Menlo, monospace; background: #f6f6f4; border: .6px solid #e2e2de; border-radius: 3px;
+        padding: 3.5px 6px; margin: 2px 0 2px; white-space: pre; overflow: hidden; }
+  .err { color: #b3261e; font-weight: 600; } .ok { color: #1a6b3a; font-weight: 600; }
+  .foot { margin-top: 5px; color: #555; font-size: 8pt; }
+</style></head><body>
+<h1>Errand Agent: Design Note</h1>
+<p class="tag">The model proposes. Code approves, executes, and verifies.</p>
+
+<h2>State model</h2>
+<p>Each chat session is in one of nine states: <code>INTAKE</code>, <code>SEARCH</code>, <code>PICK</code>, <code>HOLD</code>, <code>AWAIT_APPROVAL</code>,
+<code>EXECUTE</code>, <code>RECONCILE</code>, <code>DONE</code>, <code>FAILED</code>. A table in <code>states.py</code> lists every legal move; anything else raises
+<code>InvalidTransition</code>. The model never sets state: tools and the executor do. What the user asked for lives in a separate request frame
+(service, area, date, time, budget) and code works out what is still missing, so the model cannot decide it knows enough. Every run has hard
+limits of 8 model turns, 12 tool calls (2 kept back for reconciling) and 45 s; hitting one ends the run with a plain message that nothing was
+booked. Tapping a slot in the provider table skips the model entirely: code builds the approval card. The loose transition table lets a user change their mind from almost any step, at the cost of more paths to test.</p>
+
+<h2>Approval enforcement</h2>
+<p>The model has no <code>book</code>, <code>cancel</code> or <code>reschedule</code> tool. It gets <code>propose_*</code> tools that hold a slot and render a card. The card payload
+(provider, slot, price, fees) is stored with a SHA-256 hash. On Approve, <code>approve()</code> checks owner, status, expiry, hash and that the hold is still live, in that order.
+A typed "yes" takes the same path, matched against a fixed phrase list rather than by the model. Any material change, or a new proposal, voids the open
+approval and frees its hold, so an old yes cannot be reused for another provider, slot or price. A card expires with its 10-minute hold, and every rejection path releases the hold.</p>
+
+<h2>Idempotency and recovery</h2>
+<p><code>begin_attempt</code> is one Postgres function: it flips the approval to <code>consumed</code> and writes the attempt row in one transaction (write-ahead), so a double tap or replay finds nothing to consume.
+The key is <code>idem_&lt;approval id&gt;</code>, so every retry carries the same key and the provider replays its stored answer. After a timeout the executor calls <code>get_booking_status</code> first,
+retries with the same key at most twice and only while the hold is live, and says "booked" only once status confirms it; otherwise the attempt stays <code>unknown</code> and the user is told so.
+On start, <code>recover()</code> closes stale runs and resumes every attempt left <code>started</code> or <code>unknown</code>; the same sweep runs on the user's next message. A per-user lock stops two requests racing.</p>
+
+<h2>Memory</h2>
+<p>Each user message goes through a separate small model call that proposes facts <em>with the user's own words as evidence</em>; code then saves only what passes: a known key, a valid value, evidence that really appears in the
+user's message (so a review or provider can never become a "preference"), provider names resolved to real ids, and never on a "forget" message. The chat model is told exactly what was saved, so it cannot claim more.
+Explicit facts are active at once; inferred ones (from repeated bookings) wait as <code>pending_confirmation</code> and are hidden from the model until the user agrees; forgotten ones leave a tombstone with the value wiped.
+Only active facts enter the 6,000-token context, ranked by relevance and capped. Forgetting is thorough: it also redacts chat history, drops summaries and scrubs open requests that quote the fact.
+Cost: one extra model call (~1 s) per message. Known gap: the request frame takes the model's word for what the user said; the <code>_from_memory</code> tag only covers fields that code filled.</p>
+
+<h2>Observability</h2>
+<p>Every run writes ordered spans (<code>state_transition</code>, <code>model_call</code>, <code>tool_call</code>, <code>context</code>, <code>approval</code>) with arguments, sanitized results, latency, token counts and an estimated cost, and the same run is one LangSmith trace
+(each model and tool call a step, each chat a thread, a booking score on approve runs). Prompt text stays out of our database. The context span lists the memory, summary and message ids sent each turn, which is how tests prove a forgotten fact never reached the model.
+Excerpt from a real run (real model, Tuesday slot: <code>book</code> times out <em>after</em> succeeding), the Approve run, which has no model call:</p>
+<pre>approval: approved          hash ok, approval consumed, attempt row written first (write-ahead)
+state: AWAIT_APPROVAL -> EXECUTE
+exec.book  idem_bff735fd..  <span class="err">ERROR ToolTimeout</span>   outcome unknown: no blind retry, no claim of success
+state: EXECUTE -> RECONCILE
+exec.get_booking_status     <span class="ok">booked</span> bk_6d4fd50d, Rs 1250   asked the source of truth (by hold id, then by key)
+state: RECONCILE -> DONE    "Booked and verified: ..."   retry_count 0, 1 booking, 1 attempt  (raw: docs/traces/)</pre>
+<p class="foot">Storage: Postgres through a pooled direct connection, reads cached while a request holds the user lock (49 -> 19 database calls per turn). Checks: 61 offline eval scenarios against a scripted model with the network blocked,
+and 15 injected bugs, each of which must fail at least one scenario (15/15 caught).</p>
+</body></html>
