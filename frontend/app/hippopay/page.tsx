@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, type ApprovalCard } from "@/lib/api";
 import { parseCard, rupees } from "@/lib/cards";
-import { recordApproval, setChat, useChat, type CardState } from "@/lib/chat";
+import { endCheckout, recordApproval, setChat, useChat, type CardState } from "@/lib/chat";
 import { digits, fmtCard, fmtExpiry, validExpiry } from "@/lib/format";
 import { useSession } from "@/lib/session";
 import { Field } from "@/components/ui";
@@ -34,10 +34,22 @@ type Phase =
   | { kind: "held"; message: string }
   | { kind: "released"; message: string };
 
+/** One page per payment attempt: a new checkoutKey remounts it, so nothing from a previous payment leaks in. */
 export default function HippopayPage() {
+  const { checkoutKey } = useChat();
+  return <HippopayFlow key={checkoutKey ?? "none"} />;
+}
+
+function HippopayFlow() {
   const router = useRouter();
   const { session, ready } = useSession();
   const { checkout } = useChat();
+
+  // Every way out ends the attempt, so coming back later starts from a clean form.
+  function finish() {
+    endCheckout();
+    router.replace("/chat");
+  }
 
   const [method, setMethod] = useState<"card" | "upi">("card");
   const [holder, setHolder] = useState("");
@@ -114,7 +126,7 @@ export default function HippopayPage() {
             {amount} paid. {b.what} is booked for {b.when}.
           </p>
           <button
-            onClick={() => router.replace("/chat")}
+            onClick={finish}
             className="mt-6 h-12 w-full rounded-full bg-hippo font-semibold text-white transition-transform hover:-translate-y-0.5"
           >
             Back to Errand
@@ -140,7 +152,7 @@ export default function HippopayPage() {
               : "We'll capture the payment once the provider confirms, and tell you in the chat."}
           </p>
           <button
-            onClick={() => router.replace("/chat")}
+            onClick={finish}
             className="mt-6 h-12 w-full rounded-full bg-hippo font-semibold text-white transition-transform hover:-translate-y-0.5"
           >
             Back to Errand
@@ -259,7 +271,7 @@ export default function HippopayPage() {
 
           <button
             type="button"
-            onClick={() => router.replace("/chat")}
+            onClick={finish}
             disabled={busy}
             className="w-full text-center text-[14px] font-medium text-hippo-deep/60 hover:text-hippo-deep"
           >

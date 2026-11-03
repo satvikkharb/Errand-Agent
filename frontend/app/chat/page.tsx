@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { api, ApiError, type ApprovalCard, type Notification } from "@/lib/api";
 import {
   addItem,
+  beginCheckout,
   ensureUser,
   recordApproval,
   recordChat,
@@ -12,7 +13,6 @@ import {
   forgetSession,
   resetChat,
   setCardState,
-  setChat,
   setMemoryState,
   setPicked,
   startNewErrand,
@@ -153,7 +153,7 @@ export default function ChatPage() {
   async function approve(card: ApprovalCard) {
     if (card.action === "book") {
       // Booking is paid for first: Hippopay captures, then the backend approval runs the booking.
-      setChat((s) => ({ ...s, checkout: card }));
+      beginCheckout(card);
       router.push("/hippopay");
       return;
     }

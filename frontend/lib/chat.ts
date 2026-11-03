@@ -29,10 +29,16 @@ export type ChatState = {
   errands: Errand[];
   /** The booking card the user approved and is now paying for on Hippopay. */
   checkout: ApprovalCard | null;
+  /**
+   * Identifies one payment attempt. Hippopay is keyed by it so every attempt starts with a clean
+   * page: Next keeps visited pages alive in the background, so without it a second payment would
+   * reopen the first one's "paid" screen.
+   */
+  checkoutKey: string | null;
 };
 
 const KEY = "errand.chat.v2";
-const EMPTY: ChatState = { userId: null, sessionId: null, items: [], errands: [], checkout: null };
+const EMPTY: ChatState = { userId: null, sessionId: null, items: [], errands: [], checkout: null, checkoutKey: null };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -79,6 +85,16 @@ export function forgetSession() {
     checkout: null,
     items: s.items.map((i) => (i.kind === "card" && i.state === "pending" ? { ...i, state: "stale" as const } : i)),
   }));
+}
+
+/** Start paying for a booking card: a new attempt, so Hippopay opens on a fresh form. */
+export function beginCheckout(card: ApprovalCard) {
+  setChat((s) => ({ ...s, checkout: card, checkoutKey: uid() }));
+}
+
+/** Leave Hippopay: the next attempt (if any) gets a new page, and this one is dropped. */
+export function endCheckout() {
+  setChat((s) => ({ ...s, checkoutKey: null }));
 }
 
 export function startNewErrand() {
