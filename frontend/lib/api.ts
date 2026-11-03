@@ -10,10 +10,17 @@ export type ApprovalCard = {
   approval_id: string;
   action: ApprovalAction;
   title: string;
-  /** book/cancel: [provider (service), when, ₹price, optional price-change note]; reschedule: [provider, From …, To …] */
+  /**
+   * book: [provider (service), when, "Service ₹x", "GST (18%) ₹y", ..., "Total ₹n"] (itemised only when there are fees)
+   * cancel: [provider (service), when, ₹price]; reschedule: [provider, From …, To …]
+   */
   lines: string[];
   expires_at: string;
   buttons: string[];
+  /** book only: what the checkout itemises. */
+  breakdown?: { label: string; amount: number }[];
+  /** book only: the amount to pay, fees included. */
+  total?: number;
 };
 
 /** memory.after_booking(): "Want me to remember X?" */

@@ -1,19 +1,22 @@
 import type { ApprovalCard } from "@/lib/api";
 
-/** Reads the display lines the backend puts on an approval card (approvals.render_card). */
+const lastAmount = (s: string | undefined) => Number((s ?? "").replace(/[^\d.]/g, "")) || null;
+
+/** Reads an approval card from the backend (approvals.render_card). */
 export function parseCard(card: ApprovalCard) {
-  const [what = "", when = "", third = "", note = ""] = card.lines;
-  const price = card.action === "reschedule" ? null : Number(third.replace(/[^\d.]/g, "")) || null;
+  const [what = "", when = "", ...rest] = card.lines;
+  const isBook = card.action === "book";
   return {
-    /** "Ravi Kumar Plumber (plumber)" */
+    /** "QuickFix Plumbing (plumber)" */
     what,
-    /** "Tue 03 Nov, 10:00 AM" (or "From …" for a reschedule) */
+    /** "Tue 03 Nov, 09:00 to 11:00 AM" (or "From …" for a reschedule) */
     when,
     /** reschedule only: "To …" */
-    to: card.action === "reschedule" ? third : null,
-    price,
-    /** "Price changed from ₹x to ₹y" */
-    note: card.action === "book" ? note : "",
+    to: card.action === "reschedule" ? (rest[0] ?? null) : null,
+    /** book: what the user pays, fees included. cancel: the booking's price. reschedule: none. */
+    price: isBook ? (card.total ?? lastAmount(rest.at(-1))) : card.action === "cancel" ? lastAmount(rest[0]) : null,
+    /** book only: [Service, GST, Service fee]. One entry means no fees, so there is nothing to itemise. */
+    breakdown: isBook && (card.breakdown?.length ?? 0) > 1 ? card.breakdown! : [],
   };
 }
 

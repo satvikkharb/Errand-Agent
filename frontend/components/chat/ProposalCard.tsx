@@ -42,7 +42,16 @@ export function ProposalCard({ card, state, atLimit, working, onApprove, onRejec
 
       <p className="mt-3 rounded-lg bg-sheet px-3 py-2 text-[14px] font-medium">{p.when}</p>
       {p.to && <p className="mt-2 rounded-lg bg-sheet px-3 py-2 text-[14px] font-medium">{p.to}</p>}
-      {p.note && <p className="mt-2 text-[13px] font-medium text-orange-deep">{p.note}</p>}
+      {p.breakdown.length > 0 && (
+        <dl className="mt-2 space-y-0.5 px-1 text-[13px] text-muted">
+          {p.breakdown.map((b) => (
+            <div key={b.label} className="flex justify-between">
+              <dt>{b.label}</dt>
+              <dd>{rupees(b.amount)}</dd>
+            </div>
+          ))}
+        </dl>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {state === "pending" && (

@@ -160,7 +160,16 @@ export default function HippopayPage() {
             <p className="mt-1 text-[20px] font-semibold leading-tight">{b.what}</p>
             <p className="mt-1 text-[14px] text-white/75">{b.when}</p>
             <p className="mt-6 text-[48px] font-bold leading-none">{amount}</p>
-            {b.note && <p className="mt-2 text-[13px] text-white">{b.note}</p>}
+            {b.breakdown.length > 0 && (
+              <dl className="mt-3 space-y-0.5 text-[13px] text-white/80">
+                {b.breakdown.map((i) => (
+                  <div key={i.label} className="flex max-w-[240px] justify-between">
+                    <dt>{i.label}</dt>
+                    <dd>{rupees(i.amount)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
           </div>
           <p className="text-[13px] text-white/75">
             Demo checkout. No real money moves and nothing is stored.
