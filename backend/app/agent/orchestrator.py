@@ -17,10 +17,13 @@ from app.agent.deps import Deps
 from app.agent.executor import Executor
 from app.agent.gateway import GatewayContext, ToolGateway, tool_specs
 from app.agent.memory import MemoryService
-from app.agent.options import build_options
+from app.agent.emphasis import emphasize
+from app.agent.options import build_options, options_id
 from app.agent.proactive import ProactiveProcessor
 from app.agent.sanitize import clean_text
+from app.agent.memory_writer import MemoryWriter
 from app.agent.summarizer import Summarizer
+from app.agent.telemetry import Telemetry
 from app.agent.timefmt import when
 from app.agent.titles import HistoryService, TitleService
 from app.agent.tokens import count_tokens
@@ -76,7 +79,7 @@ class ChatResult:
     busy: bool = False
     memory_prompt: dict | None = None  # "Want me to remember X?" with Yes/No buttons
     title: str | None = None  # the conversation's current title, so the sidebar can update at once
-    options: dict | None = None  # the provider table (every match with ALL its slots) when a search just ran
+    options: dict | None = None  # the live provider table (every match with ALL its slots); options.new_this_turn says if this turn made it
 
 
 def _norm(s: str) -> str:
@@ -100,15 +103,18 @@ class Orchestrator:
     def __init__(self, app, store, clock, llm: LLM, *, builder: ContextBuilder | None = None, max_turns: int = 8,
                  max_tool_calls: int = 12, timeout_s: int = 45, sleep=time.sleep, tools_config=None,
                  allow_typed_approval: bool = True, price_in_per_1m: float = 0.40, price_out_per_1m: float = 1.60,
-                 summary_trigger: int = 30, summary_keep: int = 12, llm_titles: bool = False):
+                 summary_trigger: int = 30, summary_keep: int = 12, llm_titles: bool = False,
+                 telemetry: Telemetry | None = None, memory_llm=None):
         self.app, self.store, self.clock, self.llm = app, store, clock, llm
         self.builder = builder or ContextBuilder()
         self.max_turns, self.max_tool_calls, self.timeout_s = max_turns, max_tool_calls, timeout_s
         self.sleep, self.tools_config, self.allow_typed = sleep, tools_config, allow_typed_approval
         self.price_in, self.price_out = price_in_per_1m, price_out_per_1m
         self.specs = tool_specs()
-        self.proactive = ProactiveProcessor(app, store, clock, self._deps)
+        self.telemetry = telemetry  # LangSmith, when configured: every run is also traced there
+        self.proactive = ProactiveProcessor(app, store, clock, self._deps, telemetry)
         self.memory = MemoryService(app, clock)
+        self.memory_writer = MemoryWriter(memory_llm, self.memory, store)  # AI decides what to remember; off without a model
         self.summarizer = Summarizer(app, llm, clock, summary_trigger, summary_keep)
         self.titles = TitleService(app, llm, clock, use_llm=llm_titles)
         self.history = HistoryService(app, clock)
@@ -119,10 +125,15 @@ class Orchestrator:
         tools = ProviderTools(self.store, self.clock, self.tools_config, user_id=user_id)
         return Deps(self.app, self.store, tools, self.clock, tracer)
 
-    def _open_run(self, session_id: str):
+    def _open_run(self, session_id: str, name: str = "run", user_id: str | None = None, inputs: dict | None = None):
         run = self.app.create_run(session_id, "user_message",
                                   self.clock.now() + timedelta(seconds=self.timeout_s), self.clock.now())
-        return run, AppTracer(self.app, run["id"])
+        tracer = AppTracer(self.app, run["id"])
+        if self.telemetry:  # the same spans also go to LangSmith as one trace
+            tracer = self.telemetry.wrap(tracer, name=name, run_id=run["id"], session_id=session_id, user_id=user_id,
+                                         inputs=inputs or {})
+        run["_tracer"] = tracer  # local only: lets _close_run end the LangSmith trace
+        return run, tracer
 
     def _close_run(self, run, session_id, reply, exit_reason, budget=None, tracer=None):
         self.app.add_message(session_id, "assistant", reply, run["id"])
@@ -131,6 +142,12 @@ class Orchestrator:
         self.app.update_run(run["id"], status="failed" if exit_reason == "error" else "done",
                             exit_reason=exit_reason, final_message=reply, ended_at=self.clock.now(),
                             turns=budget.turns if budget else 0, tool_calls=budget.tool_calls if budget else 0)
+        end = getattr(run.get("_tracer"), "finish", None)
+        if end:
+            end({"reply": reply, "exit_reason": exit_reason},
+                error="run failed" if exit_reason == "error" else None,
+                metadata={"exit_reason": exit_reason, "turns": budget.turns if budget else 0,
+                          "tool_calls": budget.tool_calls if budget else 0})
 
     def _card(self, session_id) -> dict | None:
         s = self.app.session(session_id)
@@ -146,6 +163,36 @@ class Orchestrator:
         s = self.app.session(session_id)
         pending = self.app.approval(s["pending_approval_id"]) if s["pending_approval_id"] else None
         return build_options(s["request_frame"], pending)
+
+    def my_bookings(self, user_id: str) -> list[dict]:
+        """The user's upcoming confirmed bookings, straight from the booking store: the source of truth for any
+        "my bookings" list, so nothing the app or a chat remembers can drift from what is really booked."""
+        now = self.clock.now()
+        rows = []
+        for b in self.store.bookings_for_user(user_id):
+            if b["status"] != "confirmed" or b["slot_start"] <= now:
+                continue
+            end = (self.store.slot(b["slot_id"]) or {}).get("end_at")
+            start_iso, end_iso = b["slot_start"].isoformat(), end.isoformat() if end else None
+            rows.append({"id": b["id"], "provider_id": b["provider_id"],
+                         "provider_name": self._provider_name(b["provider_id"]) or b["provider_id"],
+                         "service": b["service"].replace("_", " "), "price": b["price"], "status": b["status"],
+                         "start": start_iso, "end": end_iso, "label": when(start_iso, end_iso)})
+        return rows
+
+    def _names_in_play(self, user_id: str, session_id: str) -> set[str]:
+        """Provider names this conversation can legitimately be talking about: the user's bookings, the table on
+        screen, and the card in front of them."""
+        names: set[str] = set()
+        for b in self.store.bookings_for_user(user_id):
+            name = self._provider_name(b["provider_id"])
+            if name:
+                names.add(name)
+        frame = self.app.session(session_id)["request_frame"]
+        names.update((frame.get("_search") or {}).get("names", {}).values())
+        if frame.get("_avail_view"):
+            names.add(frame["_avail_view"]["provider_name"])
+        return names
 
     def _provider_name(self, pid: str) -> str | None:
         p = self.store.provider(pid)
@@ -172,7 +219,7 @@ class Orchestrator:
     def _handle(self, user_id, message, session_id) -> ChatResult:
         s = self.app.session(session_id) if session_id else self.app.create_session(user_id)
         sid = s["id"]
-        run, tracer = self._open_run(sid)
+        run, tracer = self._open_run(sid, "chat", user_id, {"input": message})
         deps = self._deps(user_id, tracer)
         notices = self._reconcile(user_id, deps) + self._proactive_for_user(user_id)
         msg_row = self.app.add_message(sid, "user", message, run["id"])
@@ -180,14 +227,18 @@ class Orchestrator:
         budget = RunBudget(self.clock, self.max_turns, self.max_tool_calls, timeout_s=self.timeout_s)
         views: list = []
         prompt = None
-        searched_before = (self.app.session(sid)["request_frame"].get("_search") or {}).get("search_id")
+        model_wrote = False  # emphasis is for the model's free text; system messages format themselves
+        searched_before = options_id(self.app.session(sid)["request_frame"])
         try:
             typed = self._typed_decision(deps, sid, user_id, message)
             if typed is not None:
                 (reply, prompt), exit_reason = typed, "done"
             else:
                 self.summarizer.ensure(sid, user_id, tracer)  # keeps a long chat inside the context budget
-                reply, exit_reason = self._agent_loop(deps, user_id, sid, msg_row, budget, tracer, views)
+                saved = self.memory_writer.capture(user_id, message, msg_row["id"], tracer)  # BEFORE the reply, so it can use it
+                reply, exit_reason = self._agent_loop(deps, user_id, sid, msg_row, budget, tracer, views,
+                                                      MemoryWriter.note(saved))
+                model_wrote = True
         except BudgetExceeded as e:
             reply, exit_reason = MSG_LIMIT, e.reason
             tracer.span("state_transition", "run_limit", error=e.reason)
@@ -196,11 +247,15 @@ class Orchestrator:
             reply, exit_reason = MSG_ERROR, "error"
         if exit_reason == "done" and not views:
             reply = guard_reply(reply, self._card(sid) is not None)
+        if exit_reason == "done" and model_wrote:
+            reply = emphasize(reply, self._names_in_play(user_id, sid))  # service, provider, date and time stand out
         if prompt:
             reply = f"{reply}\n\n{prompt['text']}"
         self._close_run(run, sid, reply, exit_reason, budget, tracer)
-        searched_now = (self.app.session(sid)["request_frame"].get("_search") or {}).get("search_id")
-        options = self._options(sid) if searched_now and searched_now != searched_before else None  # a NEW search this turn
+        searched_now = options_id(self.app.session(sid)["request_frame"])
+        options = self._options(sid) if searched_now else None  # the current table rides on EVERY reply while it is live
+        if options:
+            options["new_this_turn"] = searched_now != searched_before  # the UI can redraw only when it is new
         return self._result(sid, reply, run, exit_reason, views, notices, prompt, options)
 
     def _typed_decision(self, deps: Deps, sid: str, user_id: str, message: str) -> tuple[str, dict | None] | None:
@@ -238,9 +293,9 @@ class Orchestrator:
         return f"{self._provider_name(m['value']) or m['value']} as your preferred {label} provider"
 
     # ---------------------------------------------------------------- agent loop
-    def _agent_loop(self, deps, user_id, sid, msg_row, budget, tracer, views) -> tuple[str, str]:
+    def _agent_loop(self, deps, user_id, sid, msg_row, budget, tracer, views, memory_note: str | None = None) -> tuple[str, str]:
         gw = ToolGateway(deps, GatewayContext(sid, user_id, msg_row["content"], msg_row["id"]), budget)
-        run_msgs: list[dict] = []
+        run_msgs: list[dict] = [{"role": "system", "content": memory_note}] if memory_note else []
         while True:
             budget.charge_turn()
             s = self.app.session(sid)
@@ -257,7 +312,10 @@ class Orchestrator:
                         output={"content": (resp.content or "")[:300],
                                 "tool_calls": [{"name": t.name, "arguments": t.arguments[:300]} for t in resp.tool_calls]},
                         latency_ms=int((time.perf_counter() - t0) * 1000), tokens_in=resp.usage.prompt_tokens,
-                        tokens_out=resp.usage.completion_tokens, cost_usd=round(cost, 6), cost_estimated=True)
+                        tokens_out=resp.usage.completion_tokens, cost_usd=round(cost, 6), cost_estimated=True,
+                        ls_messages=ctx.messages,
+                        ls_output={"content": resp.content, "tool_calls": [{"id": t.id, "name": t.name, "arguments": t.arguments}
+                                                                          for t in resp.tool_calls]})
             if not resp.tool_calls:
                 return (resp.content or "").strip() or MSG_EMPTY, "done"
             run_msgs.append({"role": "assistant", "content": resp.content or "", "tool_calls": [
@@ -281,7 +339,7 @@ class Orchestrator:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
             return ChatResult(s["id"], MSG_BUSY, s["state"], exit_reason="busy", busy=True)
         try:
-            run, tracer = self._open_run(s["id"])
+            run, tracer = self._open_run(s["id"], "approve", user_id, {"approval_id": approval_id})
             deps = self._deps(user_id, tracer)
             notices = self._reconcile(user_id, deps)
             reply, prompt = self._approve_inner(deps, user_id, approval_id)
@@ -301,6 +359,7 @@ class Orchestrator:
                 self._move_quiet(deps, a["session_id"], "SEARCH")
             return APPROVAL_ERRORS.get(res["error"], "I couldn't use that approval, so I did nothing."), None
         out = Executor(deps, sleep=self.sleep).run(res["approval"])
+        getattr(deps.tracer, "note", lambda **k: None)(outcome=out.outcome, booking_id=out.booking_id)  # charted in LangSmith
         prompt = None
         if out.outcome == "booked":  # a verified booking is the moment patterns can be noticed and asked about
             prompt = self.memory.after_booking(user_id, res["approval"]["session_id"],
@@ -315,7 +374,7 @@ class Orchestrator:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
             return ChatResult(s["id"], MSG_BUSY, s["state"], exit_reason="busy", busy=True)
         try:
-            run, tracer = self._open_run(s["id"])
+            run, tracer = self._open_run(s["id"], "reject", user_id, {"approval_id": approval_id})
             deps = self._deps(user_id, tracer)
             res = approvals.reject(deps, approval_id, user_id)
             if res["ok"]:
@@ -391,7 +450,7 @@ class Orchestrator:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
             return ChatResult(session_id, MSG_BUSY, s["state"], exit_reason="busy", busy=True)
         try:
-            run, tracer = self._open_run(session_id)
+            run, tracer = self._open_run(session_id, "open_proposal", user_id, {"session_id": session_id})
             budget = RunBudget(self.clock, max_turns=1, max_tool_calls=self.max_tool_calls, timeout_s=self.timeout_s)
             try:
                 reply, outcome = self.proactive.open_proposal(user_id, session_id, tracer, budget)
@@ -432,9 +491,12 @@ class Orchestrator:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
             return ChatResult(session_id, MSG_BUSY, s["state"], exit_reason="busy", busy=True)
         try:
-            run, tracer = self._open_run(session_id)
+            run, tracer = self._open_run(session_id, "select_slot", user_id, {"provider_id": provider_id, "slot_id": slot_id})
             deps = self._deps(user_id, tracer)
-            found = s["request_frame"].get("_search") or {}
+            frame = s["request_frame"]
+            if frame.get("_options_kind") == "reschedule_slots" and frame.get("_avail_view"):
+                return self._select_reschedule(user_id, session_id, run, deps, frame["_avail_view"], provider_id, slot_id)
+            found = frame.get("_search") or {}
             name = found.get("names", {}).get(provider_id, "that provider")
             label = when(found["times"][slot_id], found.get("ends", {}).get(slot_id)) if slot_id in found.get("times", {}) else "that slot"
             said = f"I'll take {name}, {label}"
@@ -457,6 +519,29 @@ class Orchestrator:
             return self._result(session_id, reply, run, "done", options=self._options(session_id))
         finally:
             self.app.release_lock(user_id)
+
+    def _select_reschedule(self, user_id, session_id, run, deps, view: dict, provider_id: str, slot_id: str) -> ChatResult:
+        """The user tapped a time in the reschedule table: straight to the reschedule card (caller holds the lock).
+        Only a time that was in the table is accepted; anything else refreshes the table."""
+        slot = next((x for x in view["slots"] if x["id"] == slot_id), None)
+        label = when(slot["start"], slot.get("end")) if slot else "that time"
+        said = f"Move {view['provider_name']} to {label}"
+        self.app.add_message(session_id, "user", said, run["id"])
+        budget = RunBudget(self.clock, 1, self.max_tool_calls, timeout_s=self.timeout_s)
+        try:
+            gw = ToolGateway(deps, GatewayContext(session_id, user_id, said, auto_search=False), budget)
+            out = gw.call("propose_reschedule", {"booking_id": view["booking_id"], "slot_id": slot_id}) \
+                if slot and provider_id == view["provider_id"] else None
+            if out is not None and out.ends_turn:
+                reply = PROPOSAL_TEXT["reschedule"]
+            else:  # the time went, or the list was out of date: refresh it so they can pick again
+                gw.call("get_availability", {"provider_id": view["provider_id"], "booking_id": view["booking_id"],
+                                             "date_start": view["date_start"], "date_end": view["date_end"]})
+                reply = "That time is no longer available, so I've refreshed the list. Please pick another."
+        except BudgetExceeded:
+            reply = MSG_LIMIT
+        self._close_run(run, session_id, reply, "done", budget)
+        return self._result(session_id, reply, run, "done", options=self._options(session_id))
 
     def rename_conversation(self, user_id: str, session_id: str, title: str) -> str:
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):

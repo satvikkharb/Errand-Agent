@@ -135,12 +135,12 @@ def ask_week(h, *extra):
                   say("Found three options, I'd go with the top one."), *extra)
 
 
-def test_a_search_turn_returns_the_table_and_other_turns_do_not_repeat_it():
+def test_the_live_table_rides_on_every_reply_and_says_whether_this_turn_made_it():
     h = H()
     r = ask_week(h)
-    assert r.options and len(r.options["matches"]) == 3 and r.options["selected"] is None
+    assert r.options and len(r.options["matches"]) == 3 and r.options["selected"] is None and r.options["new_this_turn"] is True
     r2 = h.chat("thanks!", say("You're welcome."))
-    assert r2.options is None  # no new search: the UI keeps the table it already has
+    assert r2.options["search_id"] == r.options["search_id"] and r2.options["new_this_turn"] is False  # "see the table" stays true
     conv = h.o.get_conversation("user_demo", r.session_id)
     assert conv["options"]["search_id"] == r.options["search_id"]  # reopening a chat restores it
 

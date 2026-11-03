@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
+    # LangSmith tracing (off unless LANGSMITH_TRACING=true AND an API key is set). See docs/langsmith.md.
+    langsmith_tracing: bool = False
+    langsmith_api_key: str = ""
+    langsmith_project: str = "errand-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"  # EU accounts: https://eu.api.smith.langchain.com
+    langsmith_workspace_id: str = ""  # only for organization-scoped keys
+    langsmith_send_prompts: bool = True  # false: send timings, tokens and tool names, but not prompt/reply text
     state_backend: str = "memory"  # memory | supabase
     cron_secret: str = ""  # Authorization: Bearer <this> on /internal/tick (Vercel Cron sends it)
     dev_endpoints: bool = False  # enables /dev/simulate/*

@@ -8,6 +8,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "supabase>=2.8",
     "openai>=1.50",
+    "langsmith>=0.14.17",
 ]
 
 [dependency-groups]
