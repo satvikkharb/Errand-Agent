@@ -1,6 +1,6 @@
 """Python mirror of db/0002_seed.sql for the in-memory store (offline tests and evals).
 
-Slot ids match the SQL: <provider>_<MMDD>_<HH>. Which slots are pre-booked differs
+Slots run from 2 Nov (the seeded "today") to 9 Nov. Slot ids match the SQL: <provider>_<MMDD>_<HH>. Which slots are pre-booked differs
 from the SQL seed (different hash), which is fine: nothing relies on it.
 """
 import zlib
@@ -45,7 +45,7 @@ INJECTED_REVIEWS = [
 ]
 
 _HOURS = (9, 11, 14, 16)
-_FIRST_DAY = datetime(2026, 11, 3, tzinfo=IST)
+_FIRST_DAY = datetime(2026, 11, 2, tzinfo=IST)
 
 
 def providers() -> list[dict]:
@@ -68,7 +68,7 @@ def reviews() -> list[dict]:
 def slots() -> list[dict]:
     rows = []
     for pid, *_ in PROVIDERS:
-        for d in range(7):
+        for d in range(8):
             day = _FIRST_DAY + timedelta(days=d)
             for h in _HOURS:
                 start = day + timedelta(hours=h)

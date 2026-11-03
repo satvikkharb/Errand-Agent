@@ -32,6 +32,7 @@ def seed_demo(app: InMemoryAppStore, now: datetime, user_id: str = "user_demo") 
         mem(f"note_{n}", f"Low-relevance preference #{n} (e.g. {_NOTES[n % 8]})", conf=0.8)
 
     app.create_session(user_id, state="DONE", session_id=SEED_SESSION_ID)
+    app.set_title(SEED_SESSION_ID, "Electrician for a fan regulator", "system")
     for n in range(1, 61):
         if n % 2:
             app.add_message(SEED_SESSION_ID, "user", f"Earlier user turn {n}: {_USER[n % 6]}")

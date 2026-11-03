@@ -6,7 +6,7 @@ from db/0001_schema.sql) is added with the orchestrator.
 import copy
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class ApprovalNotConsumable(Exception):
@@ -18,11 +18,19 @@ class InMemoryAppStore:
         self._sessions, self._approvals, self._memories, self._summaries = {}, {}, {}, []
         self._messages, self._runs, self._spans, self._attempts = {}, {}, {}, {}
         self._notifications, self._locks = [], {}
+        self._last_stamp = datetime(2000, 1, 1, tzinfo=timezone.utc)
 
     # ---- sessions ----
+    def _stamp(self) -> datetime:
+        """Strictly increasing timestamps, so ordering never depends on clock resolution."""
+        now = datetime.now(timezone.utc)
+        self._last_stamp = max(now, self._last_stamp + timedelta(microseconds=1))
+        return self._last_stamp
+
     def create_session(self, user_id: str, state: str = "INTAKE", session_id: str | None = None) -> dict:
         row = {"id": session_id or str(uuid.uuid4()), "user_id": user_id, "state": state, "request_frame": {},
-               "active_hold_id": None, "pending_approval_id": None, "version": 0}
+               "active_hold_id": None, "pending_approval_id": None, "version": 0, "title": None,
+               "title_source": None, "deleted_at": None, "created_at": self._stamp()}
         self._sessions[row["id"]] = row
         return copy.deepcopy(row)
 
@@ -87,6 +95,30 @@ class InMemoryAppStore:
     def valid_summaries(self, user_id: str) -> list[dict]:
         return [dict(s) for s in self._summaries if s["user_id"] == user_id and s["invalidated_at"] is None]
 
+    # ---- conversation history (the sidebar) ----
+    def list_conversations(self, user_id: str, limit: int = 30, before: datetime | None = None) -> list[dict]:
+        out = []
+        for s in self._sessions.values():
+            msgs = self._messages.get(s["id"]) or []
+            if s["user_id"] != user_id or s.get("deleted_at") or not msgs:
+                continue
+            last = msgs[-1]
+            if before is not None and not last["created_at"] < before:
+                continue
+            a = self._approvals.get(s["pending_approval_id"]) if s["pending_approval_id"] else None
+            out.append({"id": s["id"], "title": s.get("title"), "title_source": s.get("title_source"),
+                        "state": s["state"], "created_at": s["created_at"], "last_message_at": last["created_at"],
+                        "message_count": len(msgs), "preview": last["content"][:140],
+                        "has_pending_approval": bool(a and a["status"] == "pending")})
+        out.sort(key=lambda r: r["last_message_at"], reverse=True)
+        return out[:limit]
+
+    def set_title(self, session_id: str, title: str | None, source: str | None) -> None:
+        self._sessions[session_id].update(title=title, title_source=source)
+
+    def soft_delete_session(self, session_id: str, now: datetime) -> None:
+        self._sessions[session_id]["deleted_at"] = now
+
     def sessions_for_user(self, user_id: str) -> list[dict]:
         return [copy.deepcopy(s) for s in self._sessions.values() if s["user_id"] == user_id]
 
@@ -94,7 +126,7 @@ class InMemoryAppStore:
     def add_message(self, session_id: str, role: str, content: str, run_id: str | None = None) -> dict:
         rows = self._messages.setdefault(session_id, [])
         row = {"id": str(uuid.uuid4()), "session_id": session_id, "seq": len(rows) + 1,
-               "role": role, "content": content, "run_id": run_id}
+               "role": role, "content": content, "run_id": run_id, "created_at": self._stamp()}
         rows.append(row)
         return dict(row)
 
@@ -106,6 +138,9 @@ class InMemoryAppStore:
         if len(needle.strip()) < 4:
             return 0
         pat, n = re.compile(re.escape(needle), re.I), 0
+        for sess in self._sessions.values():  # conversation titles can quote the fact too
+            if sess["user_id"] == user_id and sess.get("title"):
+                sess["title"] = pat.sub("[forgotten]", sess["title"])
         for sid, rows in self._messages.items():
             if self._sessions[sid]["user_id"] != user_id:
                 continue

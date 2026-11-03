@@ -113,6 +113,18 @@ class SupabaseAppStore:
             self._t("conversation_summaries").update({"invalidated_at": now.isoformat()}).eq("id", summary_id) \
                 .is_("invalidated_at", "null").execute()
 
+    # ---- conversation history (the sidebar) ----
+    def list_conversations(self, user_id, limit=30, before=None):
+        rows = self.db.rpc("list_conversations", {"p_user": user_id, "p_limit": limit,
+                                                  "p_before": before.isoformat() if before else None}).execute().data
+        return [_read(r) for r in rows]
+
+    def set_title(self, session_id, title, source):
+        self._t("sessions").update({"title": title, "title_source": source}).eq("id", session_id).execute()
+
+    def soft_delete_session(self, session_id, now):
+        self._t("sessions").update({"deleted_at": now.isoformat()}).eq("id", session_id).execute()
+
     def sessions_for_user(self, user_id):
         return [_read(r) for r in self._t("sessions").select("*").eq("user_id", user_id).execute().data]
 
@@ -151,6 +163,9 @@ class SupabaseAppStore:
         if not ids or len(needle.strip()) < 4:
             return 0
         pat, n = re.compile(re.escape(needle), re.I), 0
+        for r in self._t("sessions").select("id,title").eq("user_id", user_id).execute().data:
+            if r["title"] and pat.search(r["title"]):  # conversation titles can quote the fact too
+                self._t("sessions").update({"title": pat.sub("[forgotten]", r["title"])}).eq("id", r["id"]).execute()
         q = self._t("messages").select("id,content").in_("session_id", ids)
         if not any(c in needle for c in "%_\\*,()"):  # safe to let the database narrow it down
             q = q.ilike("content", f"%{needle}%")

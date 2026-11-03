@@ -131,6 +131,7 @@ class ProactiveProcessor:
         now, user_id = self.clock.now(), booking["user_id"]
         provider = self.store.provider(booking["provider_id"])
         session = self.app.create_session(user_id)
+        self.app.set_title(session["id"], f"{booking['service'].replace('_', ' ').capitalize()}: provider cancelled", "system")
         run = self.app.create_run(session["id"], "event", now + timedelta(seconds=45), now)
         tracer = AppTracer(self.app, run["id"])
         tracer.span("event", ev["type"], input={"event_id": ev["id"], "booking_id": booking["id"]},
@@ -219,10 +220,10 @@ class ProactiveProcessor:
             out = gw.call("propose_book", {"provider_id": pick["provider_id"], "slot_id": pick["slot_id"]})
             if out.ends_turn:
                 return "Here's the replacement I'd book. Review it and tap Approve to confirm.", "proposed"
-            if out.model_view.get("status") == "over_budget":
-                return (f"The replacement now costs ₹{out.model_view['quoted_price']}, above your "
-                        f"₹{out.model_view['budget']} limit, so I didn't hold it. Tell me if you'd like to go higher.",
-                        "over_budget")
+            if out.model_view.get("status") == "price_too_different":
+                return (f"The final price came out at ₹{out.model_view['final_price']}, far above the listed "
+                        f"₹{out.model_view['listed_price']}, so I didn't hold it. Tell me if you'd like to try another option.",
+                        "price_too_different")
             prefer = None
         frame = self.app.session(session_id)["request_frame"]
         frame.pop("_suggestion", None)

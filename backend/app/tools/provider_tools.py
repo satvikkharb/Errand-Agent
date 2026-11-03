@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 
 from app.clock import IST, Clock
 from app.tools.config import ScenarioConfig
+from app.tools.day_schedule import DayScenario, day_scenario
 from app.tools.errors import ToolTimeout, ToolUnavailable
 from app.tools.store import Store
 
@@ -45,7 +46,12 @@ class ProviderTools:
     def __init__(self, store: Store, clock: Clock, config: ScenarioConfig | None = None,
                  user_id: str = "user_demo"):
         self.s, self.clock, self.user_id = store, clock, user_id
-        self.cfg = config or ScenarioConfig.from_row(store.config())
+        self.cfg = config or ScenarioConfig()  # behaviour comes from the day schedule, never from settings or the DB
+
+    @staticmethod
+    def _day(slot: dict) -> DayScenario:
+        """Which situation this booking is in: decided by the day of the slot (Asia/Kolkata)."""
+        return day_scenario(slot["start_at"].astimezone(IST).date())
 
     def _rng(self, *parts) -> random.Random:
         return random.Random(":".join(str(p) for p in (self.cfg.seed, *parts)))
@@ -125,7 +131,10 @@ class ProviderTools:
             return {"status": "slot_unavailable"}
         if not self.s.claim_slot(sid, "free", "held"):
             return {"status": "slot_unavailable"}
-        drift = self.cfg.price_drift if self._rng("drift", sid).random() < self.cfg.price_drift_prob else 0
+        if self.cfg.price_drift_prob is None:
+            drift = self._day(sl).quote_extra  # the day decides
+        else:  # test hook
+            drift = self.cfg.price_drift if self._rng("drift", sid).random() < self.cfg.price_drift_prob else 0
         hold = {"id": f"hold_{uuid.uuid4().hex[:10]}", "provider_id": provider_id, "slot_id": sid,
                 "quoted_price": p["base_price"] + drift, "status": "active",
                 "expires_at": now + timedelta(minutes=self.cfg.hold_minutes)}
@@ -134,17 +143,9 @@ class ProviderTools:
                 "quoted_price": hold["quoted_price"], "expires_at": hold["expires_at"].isoformat()}
 
     # ---------- side effects ----------
-    def _outcome(self, slot_id: str, attempt: int) -> str:
-        forced = self.cfg.forced_book_outcomes
-        if forced:
-            return forced[min(attempt, len(forced) - 1)]
-        r = self._rng("book", slot_id, attempt).random()
-        if r < self.cfg.p_success:
-            return "success"
-        if r < self.cfg.p_success + self.cfg.p_slot_taken:
-            return "slot_taken"
-        lucky = self._rng("timeout", slot_id, attempt).random() < self.cfg.timeout_success_share
-        return "timeout_success" if lucky else "timeout_fail"
+    def _outcome(self, day: DayScenario, attempt: int) -> str:
+        seq = self.cfg.forced_book_outcomes or day.book  # a forced outcome is a test hook; otherwise the day decides
+        return seq[min(attempt, len(seq) - 1)]
 
     def book(self, hold_id: str, idempotency_key: str) -> dict:
         rec = self.s.idem(idempotency_key)
@@ -163,7 +164,7 @@ class ProviderTools:
             return {"status": "hold_expired"}
 
         attempt = self.s.next_attempt(f"book:{hold_id}")
-        outcome = self._outcome(h["slot_id"], attempt)
+        outcome = self._outcome(self._day(self.s.slot(h["slot_id"])), attempt)
         if outcome == "slot_taken":
             self.s.set_slot_status(h["slot_id"], "booked")  # someone else got it
             self.s.update_hold(hold_id, status="released")
@@ -223,7 +224,7 @@ class ProviderTools:
         if not new or new["provider_id"] != b["provider_id"] or sid == b["slot_id"] \
                 or new["start_at"] <= self.clock.now():
             return {"status": "invalid_slot"}
-        if sid in self.cfg.reschedule_conflict_slots or not self.s.claim_slot(sid, "free", "booked"):
+        if sid in self.cfg.reschedule_conflict_slots or self._day(new).reschedule_conflict                 or not self.s.claim_slot(sid, "free", "booked"):
             return {"status": "slot_conflict", "booking_id": booking_id}  # old booking untouched
         if b["slot_id"]:
             self.s.set_slot_status(b["slot_id"], "free")

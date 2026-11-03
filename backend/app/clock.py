@@ -24,3 +24,14 @@ class FixedClock:
 
     def advance(self, **kwargs) -> None:
         self._now += timedelta(**kwargs)
+
+
+class OffsetClock:
+    """Starts at a chosen instant (the day the data was seeded for) and then runs in real time, so
+    "today" stays on the seeded calendar while holds still expire after 10 real minutes."""
+
+    def __init__(self, start: datetime):
+        self._start, self._t0 = start, datetime.now(timezone.utc)
+
+    def now(self) -> datetime:
+        return self._start + (datetime.now(timezone.utc) - self._t0)

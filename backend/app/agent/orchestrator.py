@@ -20,6 +20,7 @@ from app.agent.memory import MemoryService
 from app.agent.proactive import ProactiveProcessor
 from app.agent.sanitize import clean_text
 from app.agent.summarizer import Summarizer
+from app.agent.titles import HistoryService, TitleService
 from app.agent.tokens import count_tokens
 from app.agent.trace import AppTracer
 from app.llm import LLM
@@ -72,6 +73,7 @@ class ChatResult:
     notices: list = field(default_factory=list)
     busy: bool = False
     memory_prompt: dict | None = None  # "Want me to remember X?" with Yes/No buttons
+    title: str | None = None  # the conversation's current title, so the sidebar can update at once
 
 
 def _norm(s: str) -> str:
@@ -86,11 +88,16 @@ def guard_reply(text: str, has_pending: bool) -> str:
     return text
 
 
+class AppTracerNull:
+    def span(self, *a, **k):
+        pass
+
+
 class Orchestrator:
     def __init__(self, app, store, clock, llm: LLM, *, builder: ContextBuilder | None = None, max_turns: int = 8,
                  max_tool_calls: int = 12, timeout_s: int = 45, sleep=time.sleep, tools_config=None,
                  allow_typed_approval: bool = True, price_in_per_1m: float = 0.40, price_out_per_1m: float = 1.60,
-                 summary_trigger: int = 30, summary_keep: int = 12):
+                 summary_trigger: int = 30, summary_keep: int = 12, llm_titles: bool = False):
         self.app, self.store, self.clock, self.llm = app, store, clock, llm
         self.builder = builder or ContextBuilder()
         self.max_turns, self.max_tool_calls, self.timeout_s = max_turns, max_tool_calls, timeout_s
@@ -100,6 +107,8 @@ class Orchestrator:
         self.proactive = ProactiveProcessor(app, store, clock, self._deps)
         self.memory = MemoryService(app, clock)
         self.summarizer = Summarizer(app, llm, clock, summary_trigger, summary_keep)
+        self.titles = TitleService(app, llm, clock, use_llm=llm_titles)
+        self.history = HistoryService(app, clock)
         self.tools_tokens = count_tokens(json.dumps(self.specs))
 
     # ------------------------------------------------------------------ wiring
@@ -112,8 +121,10 @@ class Orchestrator:
                                   self.clock.now() + timedelta(seconds=self.timeout_s), self.clock.now())
         return run, AppTracer(self.app, run["id"])
 
-    def _close_run(self, run, session_id, reply, exit_reason, budget=None):
+    def _close_run(self, run, session_id, reply, exit_reason, budget=None, tracer=None):
         self.app.add_message(session_id, "assistant", reply, run["id"])
+        if tracer is not None:  # first exchange done: let the model write a nicer title (before spans are saved)
+            self.titles.upgrade(session_id, tracer)
         self.app.update_run(run["id"], status="failed" if exit_reason == "error" else "done",
                             exit_reason=exit_reason, final_message=reply, ended_at=self.clock.now(),
                             turns=budget.turns if budget else 0, tool_calls=budget.tool_calls if budget else 0)
@@ -126,7 +137,7 @@ class Orchestrator:
     def _result(self, session_id, reply, run, exit_reason, views=(), notices=(), memory_prompt=None):
         s = self.app.session(session_id)
         return ChatResult(session_id, reply, s["state"], run["id"], exit_reason, self._card(session_id),
-                          list(views), list(notices), memory_prompt=memory_prompt)
+                          list(views), list(notices), memory_prompt=memory_prompt, title=s.get("title"))
 
     def _provider_name(self, pid: str) -> str | None:
         p = self.store.provider(pid)
@@ -141,7 +152,7 @@ class Orchestrator:
                               None, exit_reason="rejected_input")
         if session_id:
             s = self.app.session(session_id)
-            if not s or s["user_id"] != user_id:
+            if not s or s["user_id"] != user_id or s.get("deleted_at"):
                 return ChatResult(None, "I can't find that conversation.", None, exit_reason="not_found")
         if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
             return ChatResult(session_id, MSG_BUSY, None, exit_reason="busy", busy=True)
@@ -157,6 +168,7 @@ class Orchestrator:
         deps = self._deps(user_id, tracer)
         notices = self._reconcile(user_id, deps) + self._proactive_for_user(user_id)
         msg_row = self.app.add_message(sid, "user", message, run["id"])
+        self.titles.ensure_initial(sid, message)  # the sidebar has a title from the first real message
         budget = RunBudget(self.clock, self.max_turns, self.max_tool_calls, timeout_s=self.timeout_s)
         views: list = []
         prompt = None
@@ -177,7 +189,7 @@ class Orchestrator:
             reply = guard_reply(reply, self._card(sid) is not None)
         if prompt:
             reply = f"{reply}\n\n{prompt['text']}"
-        self._close_run(run, sid, reply, exit_reason, budget)
+        self._close_run(run, sid, reply, exit_reason, budget, tracer)
         return self._result(sid, reply, run, exit_reason, views, notices, prompt)
 
     def _typed_decision(self, deps: Deps, sid: str, user_id: str, message: str) -> tuple[str, dict | None] | None:
@@ -382,6 +394,46 @@ class Orchestrator:
 
     def card(self, session_id: str) -> dict | None:
         return self._card(session_id)
+
+    # ------------------------------------------------------------ conversation history
+    def list_conversations(self, user_id: str, limit: int = 30, before=None) -> list[dict]:
+        return self.history.list(user_id, limit, before)
+
+    def get_conversation(self, user_id: str, session_id: str) -> dict | None:
+        s = self.app.session(session_id)
+        if not s or s["user_id"] != user_id or s.get("deleted_at"):
+            return None
+        msgs = self.app.messages(session_id)
+        card = self._card(session_id)
+        return {"conversation": {"id": s["id"], "title": s.get("title") or "New conversation",
+                                 "title_source": s.get("title_source"), "state": s["state"],
+                                 "created_at": s.get("created_at"), "message_count": len(msgs),
+                                 "last_message_at": msgs[-1].get("created_at") if msgs else None,
+                                 "has_pending_approval": card is not None},
+                "messages": msgs, "approval_card": card}
+
+    def rename_conversation(self, user_id: str, session_id: str, title: str) -> str:
+        if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
+            return "busy"
+        try:
+            return self.history.rename(user_id, session_id, title)
+        finally:
+            self.app.release_lock(user_id)
+
+    def delete_conversation(self, user_id: str, session_id: str) -> str:
+        """Hide a conversation. Its open approval card is withdrawn and its slot hold released first, so a deleted
+        chat can never leave something bookable behind."""
+        s = self.app.session(session_id)
+        if not s or s["user_id"] != user_id or s.get("deleted_at"):
+            return "not_found"
+        if not self.app.acquire_lock(user_id, self.clock.now(), LOCK_TTL_S):
+            return "busy"
+        try:
+            approvals.invalidate_pending(self._deps(user_id, AppTracerNull()), session_id, reason="conversation_deleted")
+            self.app.soft_delete_session(session_id, self.clock.now())
+            return "deleted"
+        finally:
+            self.app.release_lock(user_id)
 
     def _move_quiet(self, deps: Deps, sid: str, to: str) -> None:
         frm = self.app.session(sid)["state"]

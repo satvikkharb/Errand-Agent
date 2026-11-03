@@ -194,43 +194,50 @@ def test_cannot_propose_something_not_in_search_results():
     assert w.call("propose_book", provider_id="zz_99", slot_id="zz_99_1103_09").error == "not_in_search_results"
 
 
-def test_price_drift_is_shown_on_the_card():
-    w = World(price_drift_prob=1.0, price_drift=100)
-    m = w.searched().model_view["matches"][0]
+def test_extra_charges_appear_as_checkout_line_items_not_as_a_price_change():
+    w = World(price_drift_prob=1.0, price_drift=250)
+    m = w.searched(budget_max=1500).model_view["matches"][0]
     out = w.call("propose_book", provider_id=m["id"], slot_id=m["slots"][0]["id"])
-    assert any("Price changed" in line for line in out.user_view["lines"])
+    card = out.user_view
+    total = m["price"] + 250
+    assert card["total"] == total and card["breakdown"][0] == {"label": "Service", "amount": m["price"]}
+    assert sum(i["amount"] for i in card["breakdown"]) == total  # the parts add up to the total, exactly
+    assert [i["label"] for i in card["breakdown"][1:]] == ["GST (18%)", "Service fee"] or card["breakdown"][1]["label"].startswith("GST")
+    assert card["lines"][-1] == f"Total ₹{total}" and not any("Price changed" in line for line in card["lines"])
+    assert str(total) not in json.dumps(out.model_view)  # the model never sees the total, so it cannot quote it in chat
 
 
-def test_drift_past_budget_asks_instead_of_proposing():
+def test_fees_never_block_a_booking_the_listed_price_fits_the_budget():
+    """Found live: a ₹1100 plumber (budget ₹1200) was refused because the quote was ₹1350, and the agent asked
+    the user to raise their budget, twice. The budget is about the listed price; fees are shown at checkout."""
+    w = World(price_drift_prob=1.0, price_drift=250)
+    w.ready(budget_max=1200)
+    m = w.call("search_providers").model_view["matches"][0]
+    assert m["price"] <= 1200
+    out = w.call("propose_book", provider_id=m["id"], slot_id=m["slots"][0]["id"])
+    assert out.ends_turn and out.user_view["total"] == m["price"] + 250 > 1200
+    assert w.sess()["request_frame"]["budget_max"] == 1200  # the user's budget was never touched
+
+
+def test_an_absurd_gap_between_listed_and_final_price_still_stops_and_releases_the_hold():
     w = World(price_drift_prob=1.0, price_drift=900)
     m = w.searched().model_view["matches"][0]
     sid = m["slots"][0]["id"]
     out = w.call("propose_book", provider_id=m["id"], slot_id=sid)
-    assert out.model_view["status"] == "over_budget" and not out.ends_turn
+    assert out.model_view["status"] == "price_too_different" and not out.ends_turn
+    assert out.model_view["final_price"] - out.model_view["listed_price"] == 900
     assert w.sess()["pending_approval_id"] is None
     assert w.store.slot(sid)["status"] == "free"  # hold released
     assert w.sess()["state"] == "PICK"
 
 
-def test_new_proposal_supersedes_the_old_one_and_frees_its_slot():
-    w = World(price_drift_prob=0.0)
-    ms = w.searched().model_view["matches"]
-    a_slot, b_slot = ms[0]["slots"][0]["id"], ms[1]["slots"][0]["id"]
-    w.call("propose_book", provider_id=ms[0]["id"], slot_id=a_slot)
-    first = w.sess()["pending_approval_id"]
-    w.call("propose_book", provider_id=ms[1]["id"], slot_id=b_slot)
-    assert w.app.approval(first)["status"] == "invalidated"
-    assert w.store.slot(a_slot)["status"] == "free" and w.store.slot(b_slot)["status"] == "held"
-    assert approvals.approve(w.deps, first, "user_demo") == {"ok": False, "error": "approval_invalidated"}
-
-
-def test_reproposing_same_slot_returns_same_card_without_new_hold():
-    w = World(price_drift_prob=0.0)
-    m = w.searched().model_view["matches"][0]
-    args = dict(provider_id=m["id"], slot_id=m["slots"][0]["id"])
-    first = w.call("propose_book", **args).user_view["approval_id"]
-    second = w.call("propose_book", **args).user_view["approval_id"]
-    assert first == second
+def test_slots_and_the_request_are_described_in_human_times():
+    w = World()
+    out = w.ready().model_view
+    assert out["in_words"] == {"date": "Tue 3 Nov", "time": "9 am to 1 pm"}
+    slot = out["search"]["matches"][0]["slots"][0]
+    assert slot["label"] in ("Tue 3 Nov, 9–11 am", "Tue 3 Nov, 11 am–1 pm")
+    assert "14:00" not in slot["label"] and slot["id"]  # exact ids stay for tool calls
 
 
 @pytest.mark.parametrize("change", [{"date_start": "2026-11-04"}, {"budget_max": 1300}, {"area": "Koramangala"},

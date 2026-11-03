@@ -224,3 +224,30 @@ def test_memory_service_and_summarizer_on_supabase(user):
     assert all("Indiranagar" not in x["content"] and "[forgotten]" in x["content"] for x in app.messages(sid))
     assert app.valid_summaries(user) == [] and "area" not in app.session(sid)["request_frame"]
     assert [x["key"] for x in m.list_for_user(user)] == ["preferred_plumber"]  # no tombstones, no history
+
+
+def test_conversation_history_persists_across_processes_on_supabase(user):
+    from app.llm import say
+    o1, app1, _, llm1 = process()
+    o1.titles.use_llm = True
+    llm1.steps.extend([say("Here are your options."), say("Plumber for a kitchen tap"), say("Sure, Saturday works.")])
+    a = o1.handle_message(user, "Find a plumber for my kitchen tap tomorrow morning")
+    b = o1.handle_message(user, "Move my AC servicing to Saturday please")
+    assert a.title == "Plumber for a kitchen tap"  # model-written, already in the reply
+
+    o2, app2, _, llm2 = process()  # a different server process
+    rows = o2.list_conversations(user)
+    assert [r["id"] for r in rows] == [b.session_id, a.session_id]  # newest activity first
+    assert (rows[1]["title"], rows[1]["title_source"], rows[1]["message_count"]) == ("Plumber for a kitchen tap", "llm", 2)
+    assert rows[0]["title"] == "Move my AC servicing to Saturday please" and rows[0]["title_source"] == "extractive"
+    assert rows[0]["preview"] == "Sure, Saturday works."
+    full = o2.get_conversation(user, a.session_id)
+    assert [m["role"] for m in full["messages"]] == ["user", "assistant"] and full["messages"][0]["created_at"]
+
+    assert o2.rename_conversation(user, a.session_id, "Kitchen tap job") == "ok"
+    assert o2.rename_conversation("someone_else", a.session_id, "Hijack") == "not_found"
+    assert o1.list_conversations(user)[1]["title"] == "Kitchen tap job"  # the first process sees the rename
+    assert o2.delete_conversation(user, b.session_id) == "deleted"
+    assert [r["id"] for r in o1.list_conversations(user)] == [a.session_id]
+    assert o1.handle_message(user, "are you there?", b.session_id).exit_reason == "not_found"
+    assert o1.list_conversations("someone_else") == []
