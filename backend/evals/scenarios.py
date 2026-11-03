@@ -976,3 +976,6 @@ def _(t):
     bad = env.o.select_slot("user_demo", u.sid, m["id"], "ac_04_1120_09")
     t.check("an unlisted slot is refused and the earlier card is left alone",
             ("no longer available" in bad.reply, bad.approval_card["approval_id"] == chosen.approval_card["approval_id"]), (True, True))
+
+
+from evals import scenarios_capture  # noqa: E402,F401  (registers the memory-capture scenarios)

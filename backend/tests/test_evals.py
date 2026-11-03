@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 import evals.scenarios  # noqa: F401  (registers the scenarios)
-from evals.harness import REQUIRED_COVERAGE, SCENARIOS, run_all, write_report
+import socket
+
+from evals.harness import REQUIRED_COVERAGE, SCENARIOS, OfflineViolation, Scenario, no_network, run_all, run_scenario, write_report
 
 OUT = Path(__file__).resolve().parent.parent / "evals" / "results"
 
@@ -38,3 +40,35 @@ def test_the_table_was_generated_from_this_run(results):
     table = (OUT / "EVAL_TABLE.md").read_text()
     assert all(f"`{sid}`" in table for sid in results)
     assert "Invariants audited on every scenario" in table and "Coverage of the scenarios the assignment names" in table
+
+
+# ================================================================ "automated evals must run offline"
+def test_the_network_is_blocked_while_scenarios_run():
+    with no_network():
+        with pytest.raises(OfflineViolation):
+            socket.create_connection(("example.com", 80))
+        with pytest.raises(OfflineViolation):
+            socket.socket().connect(("127.0.0.1", 9))
+        with pytest.raises(OfflineViolation):
+            socket.getaddrinfo("example.com", 80)
+
+
+def test_a_scenario_that_reaches_for_the_network_fails():
+    def sneaky(t):
+        t.check("looks fine", True)
+        socket.create_connection(("api.openai.com", 443))  # what a real model call would do
+
+    r = run_scenario(Scenario("sneaky", "Test", "must fail", (), "", sneaky))
+    assert not r.passed and "network" in (r.error or "")
+
+
+def test_every_scenario_passes_with_no_credentials_in_the_environment(monkeypatch):
+    for k in ("OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_DB_URL", "LANGSMITH_API_KEY",
+              "LANGSMITH_TRACING", "STATE_BACKEND"):
+        monkeypatch.delenv(k, raising=False)
+    failed = [r.id for r in run_all().values() if not r.passed]
+    assert failed == []
+
+
+def test_the_table_says_the_run_was_offline():
+    assert "network access is blocked" in (OUT / "EVAL_TABLE.md").read_text()
