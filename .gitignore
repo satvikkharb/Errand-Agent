@@ -6,3 +6,4 @@ __pycache__/
 node_modules/
 .vercel/
 .DS_Store
+.taste-skill/
