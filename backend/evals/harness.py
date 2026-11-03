@@ -6,16 +6,19 @@ only fake parts are the model (scripted, so runs are reproducible and free) and 
 so a scenario cannot pass while quietly breaking "no booking without valid approval".
 """
 import json
+import socket
 import time
 import traceback
 from collections import Counter
 from contextlib import contextmanager
+from unittest.mock import patch
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable
 
 from app.agent.app_store import InMemoryAppStore
 from app.agent.context import ContextBuilder
+from app.agent.memory_writer import MemoryWriter
 from app.agent.orchestrator import Orchestrator
 from app.agent.seed import seed_demo
 from app.agent.tokens import messages_tokens
@@ -53,6 +56,26 @@ REQUIRED_COVERAGE = {  # the scenarios the assignment names explicitly
     "proactive-cancellation": "Proactive cancellation", "context-budget": "Context budget",
     "limit-exhaustion": "Limit exhaustion", "tool-failures": "Tool failures",
 }
+
+
+# ====================================================================== offline guarantee
+class OfflineViolation(AssertionError):
+    """A scenario tried to reach the network. Evals must run against a scripted model and the mock world only."""
+
+
+@contextmanager
+def no_network():
+    """While a scenario runs, any attempt to open a connection or resolve a host fails the scenario loudly.
+
+    This is what makes "runs offline" a checked property instead of a promise: a real OpenAI, Supabase or LangSmith
+    call sneaking into an eval cannot pass, and cannot be silently slow or flaky either.
+    """
+    def blocked(*_a, **_k):
+        raise OfflineViolation("an eval tried to use the network (evals must be offline: scripted model, mock providers)")
+
+    with patch.object(socket.socket, "connect", blocked), patch.object(socket.socket, "connect_ex", blocked), \
+            patch.object(socket, "create_connection", blocked), patch.object(socket, "getaddrinfo", blocked):
+        yield
 
 
 # ====================================================================== registry
@@ -111,11 +134,11 @@ class Tracker:
 class AuditLLM:
     """Wraps the scripted model and audits every request it receives, at the moment it is made."""
 
-    def __init__(self, inner: ScriptedLLM, env: "Env"):
-        self.inner, self.env = inner, env
+    def __init__(self, inner: ScriptedLLM, env: "Env", data_only: bool = False):
+        self.inner, self.env, self.data_only = inner, env, data_only  # data_only: its fixed rules are not user data
 
     def complete(self, messages, tools):
-        self.env.audit_request(messages, tools)
+        self.env.audit_request(messages, tools, data_only=self.data_only)
         try:
             return self.inner.complete(messages, tools)
         except AssertionError:  # ScriptedLLM ran out of steps: the scenario under-specified the model
@@ -185,6 +208,7 @@ class Env:
         self.faults: dict[str, list] = {}
         self.forbidden: set[str] = set()
         self.script_dry = False
+        self.memory_script: ScriptedLLM | None = None
         self.default_user = "user_demo"
         Env.ACTIVE[id(self.store)] = self
 
@@ -238,14 +262,21 @@ class Env:
         """From now on these strings must never appear in a model request."""
         self.forbidden |= {v.lower() for v in values}
 
+    def ai_memory(self, *steps) -> ScriptedLLM:
+        """Turn on the AI memory writer, with its own scripted model (one step per user message it reads)."""
+        self.memory_script = ScriptedLLM(list(steps))
+        self.o.memory_writer = MemoryWriter(AuditLLM(self.memory_script, self, data_only=True), self.o.memory, self.store)
+        return self.memory_script
+
     def new_process(self) -> Orchestrator:
         """A fresh server process over the same database: new orchestrator, same stores."""
         return Orchestrator(self.app, self.store, self.clock, AuditLLM(ScriptedLLM([]), self), tools_config=self.cfg,
                             sleep=lambda s: None)
 
     # ---- always-on audits: model requests
-    def audit_request(self, messages: list[dict], tools: list) -> None:
-        text = "\n".join(m.get("content") or "" for m in messages).lower()
+    def audit_request(self, messages: list[dict], tools: list, data_only: bool = False) -> None:
+        # data_only: the memory writer's system rules are fixed text with examples, not user data, so only the rest is audited
+        text = "\n".join(m.get("content") or "" for m in messages if not (data_only and m["role"] == "system")).lower()
         if tools and messages_tokens(messages) + self.o.tools_tokens > self.budget:  # summarizer calls carry no tools
             self.violations.append(("I6", f"request of {messages_tokens(messages) + self.o.tools_tokens} tokens "
                                           f"exceeds budget {self.budget}"))
@@ -283,6 +314,8 @@ class Env:
             v.append(("SCRIPT", "the scripted model ran out of steps (scenario under-specified)"))
         if self.script.steps:
             v.append(("SCRIPT", f"{len(self.script.steps)} scripted model steps were never used (scenario over-specified)"))
+        if self.memory_script and self.memory_script.steps:
+            v.append(("SCRIPT", f"{len(self.memory_script.steps)} scripted memory-writer steps were never used"))
         attempts, approvals = self.attempts(), self.app._approvals
         for s in self.sidefx:
             if not s["has_attempt"]:
@@ -387,14 +420,14 @@ class ScenarioResult:
 
 def run_scenario(sc: Scenario) -> ScenarioResult:
     t, err, t0 = Tracker(), None, time.perf_counter()
-    with instrumented():
+    with instrumented(), no_network():
         try:
             sc.fn(t)
         except Exception as e:  # a crashing scenario is a failing scenario, with the traceback in the report
             err = f"{type(e).__name__}: {e} | {traceback.format_exc().splitlines()[-3].strip()}"
         violations = [x for env in t.envs for x in env.finish()]
     return ScenarioResult(sc.id, sc.category, sc.expected, sc.covers, t.checks, t.notes, violations, err,
-                          sum(len(e.script.calls) for e in t.envs), int((time.perf_counter() - t0) * 1000))
+                          sum(len(e.script.calls) + (len(e.memory_script.calls) if e.memory_script else 0) for e in t.envs), int((time.perf_counter() - t0) * 1000))
 
 
 def run_all(only: list[str] | None = None) -> dict[str, ScenarioResult]:
@@ -411,13 +444,13 @@ def _cell(s: str) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
 
 
-def render_table(results: dict[str, ScenarioResult]) -> str:
+def render_scenarios(results: dict[str, ScenarioResult], title: str | None = "# Eval results") -> str:
+    """The eval table proper: scenario · expected · actual · pass/fail · notes (plus category)."""
     rs = list(results.values())
     passed = sum(r.passed for r in rs)
-    lines = [
-        "# Eval results", "",
-        f"**{passed}/{len(rs)} scenarios passed.** Model: scripted (offline, deterministic). "
-        f"Generated by `pytest tests/test_evals.py`, not written by hand.", "",
+    lines = ([title, ""] if title else []) + [
+        f"**{passed}/{len(rs)} scenarios passed.** Model: scripted (offline, deterministic); network access is blocked while the scenarios run. "
+        f"Generated by `pytest tests/test_evals.py` (or `python -m evals`), not written by hand.", "",
         "| # | Scenario | Category | Expected | Actual | Result | Notes |", "|---|---|---|---|---|---|---|"]
     for i, r in enumerate(rs, 1):
         shown = r.checks[:6]
@@ -432,6 +465,12 @@ def render_table(results: dict[str, ScenarioResult]) -> str:
             notes += f" ERROR: {r.error}"
         lines.append(f"| {i} | `{r.id}` | {r.category} | {_cell(r.expected)} | {_cell(actual)} | "
                      f"{'PASS' if r.passed else '**FAIL**'} | {_cell(notes.strip())} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_table(results: dict[str, ScenarioResult]) -> str:
+    rs = list(results.values())
+    lines = [render_scenarios(results).rstrip("\n")]
     lines += ["", "## Invariants audited on every scenario", "",
               "| ID | Invariant | Scenarios audited | Violations |", "|---|---|---|---|"]
     for iid, text in INVARIANTS.items():
@@ -446,9 +485,26 @@ def render_table(results: dict[str, ScenarioResult]) -> str:
     return "\n".join(lines) + "\n"
 
 
+README_START, README_END = "<!-- eval-table:start -->", "<!-- eval-table:end -->"
+
+
+def update_readme(results: dict[str, ScenarioResult], readme) -> bool:
+    """Refresh the README's eval table from this run. Only the text between the two markers is ever touched."""
+    text = readme.read_text()
+    if README_START not in text or README_END not in text:
+        return False
+    head, rest = text.split(README_START, 1)
+    tail = rest.split(README_END, 1)[1]
+    readme.write_text(f"{head}{README_START}\n{render_scenarios(results, title=None)}{README_END}{tail}")
+    return True
+
+
 def write_report(results: dict[str, ScenarioResult], out_dir) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "EVAL_TABLE.md").write_text(render_table(results))
+    readme = out_dir.resolve().parents[2] / "README.md"  # backend/evals/results -> repo root
+    if readme.exists():
+        update_readme(results, readme)
     (out_dir / "eval_results.json").write_text(json.dumps({
         r.id: {"category": r.category, "expected": r.expected, "passed": r.passed, "llm_calls": r.llm_calls,
                "duration_ms": r.duration_ms, "notes": r.notes, "error": r.error,

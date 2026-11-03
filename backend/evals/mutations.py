@@ -4,6 +4,7 @@ Each mutation re-introduces a realistic bug (the kind this system exists to prev
 one full eval run. A mutation that no scenario catches would mean the evals prove nothing about that
 property, so the test fails.
 """
+import re
 import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.agent import approvals as approvals_mod
 from app.agent import gateway as gateway_mod
+from app.agent import memory_writer as mw_mod
 from app.agent import orchestrator as orch_mod
 from app.agent.app_store import InMemoryAppStore
 from app.agent.context import ContextBuilder
@@ -123,6 +125,25 @@ def _mut_book_tool_exposed(stack):
     stack.enter_context(patch.object(gateway_mod.ToolGateway, "_t_book", _t_book, create=True))
 
 
+def _mut_evidence_unchecked(stack):
+    """The memory writer stops requiring that its evidence is in the USER's message."""
+    orig = mw_mod.MemoryWriter._validate
+    stack.enter_context(patch.object(mw_mod.MemoryWriter, "_validate",
+                                     lambda self, fact, message: orig(self, fact, fact.get("evidence") or "")))
+
+
+def _mut_writer_ignores_forget(stack):
+    stack.enter_context(patch.object(mw_mod, "_FORGET", re.compile(r"(?!x)x")))  # never matches
+
+
+def _mut_memory_note_dropped(stack):
+    stack.enter_context(patch.object(mw_mod.MemoryWriter, "note", staticmethod(lambda saved: None)))
+
+
+def _mut_provider_name_guessed(stack):
+    stack.enter_context(patch.object(mw_mod.MemoryWriter, "_provider_id", lambda self, name, key: "pl_01"))
+
+
 MUTATIONS = [
     Mutation("approval-not-single-use", "approvals can be reused and attempts duplicated", _mut_single_use),
     Mutation("idempotency-key-random", "a fresh idempotency key per attempt instead of one derived from the approval", _mut_random_key),
@@ -135,6 +156,10 @@ MUTATIONS = [
     Mutation("holds-never-released", "slots stay held after a card is withdrawn or expires", _mut_holds_never_released),
     Mutation("typed-yes-too-eager", "'yes, but make it free' is accepted as approval", _mut_eager_yes),
     Mutation("book-tool-exposed-to-model", "the model is given the real book tool", _mut_book_tool_exposed),
+    Mutation("memory-evidence-unchecked", "the memory writer saves facts whose quote is not in the user's own message", _mut_evidence_unchecked),
+    Mutation("memory-writer-ignores-forget", "the memory writer runs on 'forget this' messages", _mut_writer_ignores_forget),
+    Mutation("memory-note-dropped", "the chat model is not told what was saved, so it can claim things that did not happen", _mut_memory_note_dropped),
+    Mutation("memory-provider-name-guessed", "an unknown provider name is saved as some provider instead of dropped", _mut_provider_name_guessed),
 ]
 
 
