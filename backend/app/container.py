@@ -23,7 +23,10 @@ def make_clock(settings):
     if raw.lower() in ("system", "real", "now"):
         return SystemClock()
     start = datetime.fromisoformat(raw)
-    return FixedClock(start) if settings.sim_freeze else OffsetClock(start)
+    if settings.sim_freeze:
+        return FixedClock(start)
+    anchor = datetime.fromisoformat(settings.sim_anchor) if (settings.sim_anchor or "").strip() else None
+    return OffsetClock(start, anchor=anchor, loop_hours=settings.sim_loop_hours or None)
 
 
 @lru_cache

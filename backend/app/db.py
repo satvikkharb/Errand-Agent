@@ -32,5 +32,6 @@ def get_db():
     if uses_postgres():
         from app.db_pg import get_pg
 
-        return get_pg(get_settings().supabase_db_url)
+        s = get_settings()
+        return get_pg(s.supabase_db_url, s.db_pool_min, s.db_pool_max)
     return get_rest_db()
