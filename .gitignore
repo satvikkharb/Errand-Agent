@@ -10,3 +10,6 @@ node_modules/
 # volatile eval timings (the markdown tables are deterministic and committed)
 backend/evals/results/eval_results.json
 .taste-skill/
+
+# local dev servers started by scripts/rebuild.sh
+.rebuild/
