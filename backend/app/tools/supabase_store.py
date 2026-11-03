@@ -4,7 +4,7 @@ from app.db import get_db
 
 _DT_FIELDS = ("start_at", "end_at", "expires_at", "slot_start", "created_at", "updated_at", "decided_at",
               "consumed_at", "deadline_at", "started_at", "ended_at", "resolved_at", "locked_until",
-              "forgotten_at", "invalidated_at", "read_at", "ts", "claimed_at", "processed_at", "prompted_at")
+              "forgotten_at", "invalidated_at", "read_at", "ts", "claimed_at", "processed_at", "prompted_at", "last_message_at", "deleted_at")
 
 
 def _read(row: dict | None) -> dict | None:

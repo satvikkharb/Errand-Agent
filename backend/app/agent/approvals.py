@@ -7,24 +7,28 @@ import json
 from datetime import datetime
 
 from app.agent.deps import Deps
-from app.clock import IST
+from app.agent.timefmt import price_breakdown, when
 
 
 def payload_hash(payload: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-def _fmt(iso: str) -> str:
-    return datetime.fromisoformat(iso).astimezone(IST).strftime("%a %d %b, %I:%M %p")
+def _fmt(iso: str, end_iso: str | None = None) -> str:
+    return when(iso, end_iso)  # "Wed 4 Nov, 2-4 pm", never "14:00"
 
 
 def render_card(a: dict) -> dict:
     """The thing the user sees and taps. Built from stored data, never from model text."""
     p = a["payload"]
+    extra: dict = {}
     if a["action"] == "book":
-        lines = [f"{p['provider_name']} ({p['service'].replace('_', ' ')})", _fmt(p["slot_start"]), f"₹{p['price']}"]
-        if p["price"] != p["search_price"]:
-            lines.append(f"Price changed from ₹{p['search_price']} to ₹{p['price']}")
+        # Chat only ever quotes the service price. Taxes and fees appear here, at checkout, and nowhere else.
+        items = price_breakdown(p["search_price"], p["price"])
+        lines = [f"{p['provider_name']} ({p['service'].replace('_', ' ')})", _fmt(p["slot_start"], p.get("slot_end"))]
+        lines += [f"{i['label']} ₹{i['amount']}" for i in items] if len(items) > 1 else []
+        lines.append(f"Total ₹{p['price']}")
+        extra = {"breakdown": items, "total": p["price"]}
         title = "Confirm booking"
     elif a["action"] == "cancel":
         lines = [f"{p['provider_name']} ({p['service'].replace('_', ' ')})", _fmt(p["slot_start"]), f"₹{p['price']}"]
@@ -34,7 +38,7 @@ def render_card(a: dict) -> dict:
                  f"From {_fmt(p['from_start'])}", f"To {_fmt(p['to_start'])}"]
         title = "Confirm reschedule"
     return {"approval_id": a["id"], "action": a["action"], "title": title, "lines": lines,
-            "expires_at": a["expires_at"].isoformat(), "buttons": ["Approve", "Cancel"]}
+            "expires_at": a["expires_at"].isoformat(), "buttons": ["Approve", "Cancel"], **extra}
 
 
 def invalidate_pending(deps: Deps, session_id: str, reason: str) -> str | None:
@@ -86,6 +90,8 @@ def approve(deps: Deps, approval_id: str, user_id: str) -> dict:
     now = deps.clock.now()
     if now >= a["expires_at"]:
         deps.app.update_approval(approval_id, status="expired", decided_at=now)
+        if a["payload"].get("hold_id"):
+            release_hold(deps, a["payload"]["hold_id"])  # don't leave the slot locked until a later sweep
         return {"ok": False, "error": "approval_expired"}
     if payload_hash(a["payload"]) != a["payload_hash"]:
         deps.app.update_approval(approval_id, status="invalidated", decided_at=now)
@@ -94,6 +100,7 @@ def approve(deps: Deps, approval_id: str, user_id: str) -> dict:
         h = deps.store.hold(a["payload"]["hold_id"])
         if not h or h["status"] != "active" or now >= h["expires_at"]:
             deps.app.update_approval(approval_id, status="expired", decided_at=now)
+            release_hold(deps, a["payload"]["hold_id"])
             return {"ok": False, "error": "hold_expired"}
     deps.app.update_approval(approval_id, status="approved", decided_at=now)
     deps.tracer.span("approval", "approved", input={"approval_id": approval_id, "action": a["action"]})

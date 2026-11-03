@@ -132,8 +132,10 @@ class Executor:
         if st["status"] != "booked" or not st.get("booking_id"):
             return ExecResult("unknown", MSG_UNKNOWN)  # book said success but the source of truth disagrees
         p = a["payload"]
-        return ExecResult("booked", f"Booked and verified: {p['provider_name']}, {_fmt(p['slot_start'])}, "
-                                    f"₹{st['price']}. Booking ID {st['booking_id']}.", st["booking_id"])
+        paid = f"₹{st['price']}" if st["price"] == p["search_price"] else \
+            f"₹{st['price']} in total (₹{p['search_price']} service plus taxes and fees)"
+        return ExecResult("booked", f"Booked and verified: {p['provider_name']}, {_fmt(p['slot_start'], p.get('slot_end'))}, "
+                                    f"{paid}. Booking ID {st['booking_id']}.", st["booking_id"])
 
     # ---------------------------------------------------------------- cancel
     def _cancel(self, a: dict, att: dict, check_first: bool) -> ExecResult:

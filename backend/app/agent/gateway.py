@@ -18,6 +18,7 @@ from app.agent.budget import BudgetExceeded, RunBudget
 from app.agent.deps import Deps
 from app.agent.memory import BUDGET_KEY, FRAME_NAME_OF_FIELD, MEMORY_KEYS, TIME_OF_DAY, MemoryService
 from app.agent.sanitize import clean_text, sanitize
+from app.agent.timefmt import date_text, window_text, when
 from app.clock import IST
 from app.tools.errors import ToolTimeout, ToolUnavailable
 
@@ -34,6 +35,7 @@ SlotId = Annotated[str, StringConstraints(pattern=r"^[a-z]{2}_\d{2}_\d{4}_\d{2}$
 BookingId = Annotated[str, StringConstraints(pattern=r"^bk_[a-z0-9]{3,12}$")]
 MAX_SPAN_DAYS = 14
 MAX_MATCHES = 5
+MAX_FEES_PCT = 0.5  # taxes and fees beyond half the listed price are not 'fees': stop and tell the user
 
 VALUE_HELP = {"time": '24-hour HH:MM as a string, for example "10:00"', "int": "a positive whole number",
               "bool": "true or false", "str": "a short plain-text value"}
@@ -153,6 +155,11 @@ class ToolOutcome:
     flags: list[str] = field(default_factory=list)  # injection attempts a handler already hid
 
 
+def _labelled(slots: list[dict]) -> list[dict]:
+    """Slots as the model should talk about them: a ready-made human label next to the exact ids."""
+    return [{**s, "label": when(s["start"], s["end"])} for s in slots]
+
+
 def _err(name: str, error: str, **kw) -> ToolOutcome:
     return ToolOutcome(name, {"status": "error", "error": error, **kw}, error=error)
 
@@ -247,8 +254,8 @@ class ToolGateway:
         return ToolOutcome(
             "propose_" + a["action"],
             {"status": "awaiting_user_approval",
-             "note": "The approval card is shown to the user. Do not restate or change its details. Tell the "
-                     "user they can tap Approve, or ask for something different."},
+             "note": "The approval card is shown to the user with the full price breakdown (taxes and fees). Do not "
+                     "restate prices or other details from it. Tell the user they can tap Approve, or ask for something else."},
             user_view=approvals.render_card(a), ends_turn=True)
 
     def _my_booking(self, booking_id: str) -> tuple[dict | None, str | None]:
@@ -338,6 +345,8 @@ class ToolGateway:
             self._move("INTAKE" if (miss or part) else "SEARCH")
         out = ToolOutcome("update_request_frame", {
             "status": "ok", "frame": fr.public(new), "changed": changed, "missing": miss, "partial": part,
+            "in_words": {k: v for k, v in (("date", date_text(new.get("date_start"), new.get("date_end"))),
+                                           ("time", window_text(new.get("window_start"), new.get("window_end"), new.get("any_time")))) if v},
             "from_saved_preferences": from_memory, "approval_voided": voided is not None,
             **({"ignored": ignored} if ignored else {})})
         if self.ctx.auto_search and not (miss or part) and self._session()["state"] == "SEARCH":
@@ -395,7 +404,7 @@ class ToolGateway:
             "matches": [{"rank": i + 1, "id": p["id"], "name": p["name"], "rating": p["rating"],
                          "price": p["price"], "visit_fee": p["attributes"].get("visit_fee"),
                          **({"user_preferred": True} if is_preferred(p) else {}),
-                         "slots": p["slots"][:6]} for i, p in enumerate(top)]})
+                         "slots": _labelled(p["slots"][:6])} for i, p in enumerate(top)]})
 
     def _canonical_area(self, text: str) -> str | None:
         return next((a for a in self.d.store.areas() if a.lower() == text.strip().lower()), None)
@@ -434,7 +443,7 @@ class ToolGateway:
         frame.setdefault("_avail", {})[a.provider_id] = [s["id"] for s in slots]
         frame.setdefault("_avail_times", {}).update({s["id"]: s["start"] for s in slots})
         self._save_frame(frame)
-        return ToolOutcome("get_availability", {"status": "ok", "provider_id": a.provider_id, "slots": slots})
+        return ToolOutcome("get_availability", {"status": "ok", "provider_id": a.provider_id, "slots": _labelled(slots)})
 
     def _t_list_bookings(self, _: NoArgs) -> ToolOutcome:
         return ToolOutcome("list_bookings", {"status": "ok", **self.d.tools.list_bookings(self.ctx.user_id)})
@@ -459,16 +468,19 @@ class ToolGateway:
             self._move("SEARCH")
             return _err("propose_book", "slot_unavailable", hint="Search again and offer other slots.")
         search_price = seen["prices"][a.provider_id]
-        budget = frame.get("budget_max")
-        if budget is not None and h["quoted_price"] > budget:
+        # The budget is about the listed service price, and search already enforced it. What the quote adds on top is
+        # taxes and fees: they are shown at checkout (the card), never argued about in chat. Only an absurd gap stops us.
+        if h["quoted_price"] - search_price > search_price * MAX_FEES_PCT:
             approvals.release_hold(self.d, h["hold_id"])
             self._move("PICK")
-            return ToolOutcome("propose_book", {"status": "over_budget", "quoted_price": h["quoted_price"],
-                                                "search_price": search_price, "budget": budget})
+            return ToolOutcome("propose_book", {"status": "price_too_different", "listed_price": search_price,
+                                                "final_price": h["quoted_price"],
+                                                "note": "The final price is far above the listed price, so nothing was held."})
         p = self.d.store.provider(a.provider_id)
         sl = self.d.store.slot(a.slot_id)
         payload = {"action": "book", "provider_id": a.provider_id, "provider_name": self._provider_name(p),
                    "service": p["service"], "slot_id": a.slot_id, "slot_start": sl["start_at"].isoformat(),
+                   "slot_end": sl["end_at"].isoformat(),
                    "hold_id": h["hold_id"], "price": h["quoted_price"], "search_price": search_price,
                    "user_id": self.ctx.user_id}
         return self._propose("book", payload, datetime.fromisoformat(h["expires_at"]))

@@ -1,8 +1,9 @@
 from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -183,3 +184,46 @@ def forget_memory(memory_id: str, user_id: str):
     if not res:
         raise HTTPException(404, "memory not found")
     return {"ok": True, **res}
+
+
+# ------------------------------------------------------------------ conversation history (the sidebar)
+class RenameIn(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=200)
+
+
+@app.get("/conversations")
+def conversations(user_id: str, limit: int = Query(30, ge=1, le=100), before: datetime | None = None):
+    """This user's conversations, most recently active first. Page with `before` = the last item's last_message_at."""
+    return {"conversations": _orch().list_conversations(user_id, limit, before)}
+
+
+@app.get("/conversations/{conversation_id}")
+def conversation(conversation_id: str, user_id: str):
+    """Open one conversation: its messages, and the approval card if one is still waiting."""
+    c = _orch().get_conversation(user_id, conversation_id)
+    if not c:
+        raise HTTPException(404, "conversation not found")
+    return c
+
+
+@app.patch("/conversations/{conversation_id}")
+def rename_conversation(conversation_id: str, body: RenameIn):
+    status = _orch().rename_conversation(body.user_id, conversation_id, body.title)
+    if status == "not_found":
+        raise HTTPException(404, "conversation not found")
+    if status == "busy":
+        raise HTTPException(409, "busy with another request, try again")
+    if status == "bad_title":
+        raise HTTPException(422, "title must be 1-80 plain characters")
+    return {"ok": True, **_orch().get_conversation(body.user_id, conversation_id)["conversation"]}
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str, user_id: str):
+    status = _orch().delete_conversation(user_id, conversation_id)
+    if status == "not_found":
+        raise HTTPException(404, "conversation not found")
+    if status == "busy":
+        raise HTTPException(409, "busy with another request, try again")
+    return {"ok": True}

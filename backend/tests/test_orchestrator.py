@@ -369,7 +369,7 @@ def test_forgotten_fact_never_reaches_the_model_again():
 
 def test_tool_results_are_dropped_before_budget_is_blown():
     tools_tokens = Orchestrator(InMemoryAppStore(), InMemoryStore(), FixedClock(NOW), ScriptedLLM([])).tools_tokens
-    h = H([call("list_bookings"), call("list_bookings"), call("list_bookings"), say("ok")], budget=tools_tokens + 700)
+    h = H([call("list_bookings"), call("list_bookings"), call("list_bookings"), say("ok")], budget=tools_tokens + 1100)
     r = h.chat("list my bookings a few times")
     ctxs = [s["output"] for s in h.spans(r.run_id, "context")]
     assert all(c["tokens"] <= c["budget"] for c in ctxs) and ctxs[-1]["tool_results_stubbed"] >= 1

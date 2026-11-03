@@ -237,3 +237,38 @@ def test_redaction_summary_bookkeeping_sessions_and_prompted_at(ctx):
     assert m.get("prompted_at") is None
     store.update_memory(m["id"], prompted_at=NOW)
     assert store.memories(u)[0]["prompted_at"] == NOW
+
+
+def test_conversation_list_titles_pagination_and_soft_delete(ctx):
+    store, new_user = ctx
+    u, other = new_user(), new_user()
+    a, b, empty, gone, theirs = (store.create_session(u), store.create_session(u), store.create_session(u),
+                                 store.create_session(u), store.create_session(other))
+    for s, text in ((a, "first chat"), (b, "second chat"), (gone, "will be deleted"), (theirs, "not mine")):
+        store.add_message(s["id"], "user", text)
+        store.add_message(s["id"], "assistant", f"reply to {text}")
+    store.set_title(a["id"], "Plumber for a tap", "llm")
+    store.set_title(b["id"], "AC servicing", "extractive")
+    store.soft_delete_session(gone["id"], NOW)
+    assert store.session(a["id"])["title"] == "Plumber for a tap" and store.session(gone["id"])["deleted_at"] == NOW
+
+    rows = store.list_conversations(u)
+    assert [r["id"] for r in rows] == [b["id"], a["id"]]  # newest activity first; empty, deleted and others' excluded
+    r = rows[1]
+    assert (r["title"], r["title_source"], r["state"], r["message_count"]) == ("Plumber for a tap", "llm", "INTAKE", 2)
+    assert r["preview"] == "reply to first chat" and r["has_pending_approval"] is False
+    assert r["created_at"] <= r["last_message_at"]
+    store.add_message(a["id"], "user", "bumps it to the top")  # activity reorders the list
+    assert [x["id"] for x in store.list_conversations(u)] == [a["id"], b["id"]]
+    assert [x["id"] for x in store.list_conversations(u, limit=1)] == [a["id"]]
+    cursor = store.list_conversations(u, limit=1)[0]["last_message_at"]
+    assert [x["id"] for x in store.list_conversations(u, limit=5, before=cursor)] == [b["id"]]
+    assert store.list_conversations(other)[0]["id"] == theirs["id"] and len(store.list_conversations(other)) == 1
+
+    ap = approved(store, a["id"], status="pending")  # a waiting card shows up as a flag
+    store.update_session(a["id"], pending_approval_id=ap["id"])
+    assert next(x for x in store.list_conversations(u) if x["id"] == a["id"])["has_pending_approval"] is True
+    store.add_message(a["id"], "user", "Plumber in Indiranagar")
+    store.set_title(b["id"], "Plumber in Indiranagar", "user")
+    store.redact_messages(u, "indiranagar")  # forgetting reaches titles too
+    assert store.session(b["id"])["title"] == "Plumber in [forgotten]"

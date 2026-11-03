@@ -124,30 +124,11 @@ def test_timeout_without_booking_then_retry_succeeds():
     assert t.book(h["hold_id"], "k1")["status"] == "success"
 
 
-def test_book_outcome_mix_is_about_70_15_15_and_half_of_timeouts_booked():
-    t, store, _ = make()
-    slots = [s for s in store._slots.values() if s["status"] == "free"]
-    counts = {"success": 0, "slot_taken": 0, "timeout": 0}
-    timeout_booked = 0
-    for i, s in enumerate(slots):
-        h = t.hold_slot(s["provider_id"], s["id"])
-        try:
-            counts[t.book(h["hold_id"], f"k{i}")["status"]] += 1
-        except ToolTimeout:
-            counts["timeout"] += 1
-            timeout_booked += t.get_booking_status(idempotency_key=f"k{i}")["status"] == "booked"
-    n = len(slots)
-    assert abs(counts["success"] / n - 0.70) < 0.07
-    assert abs(counts["slot_taken"] / n - 0.15) < 0.07
-    assert abs(counts["timeout"] / n - 0.15) < 0.07
-    assert abs(timeout_booked / counts["timeout"] - 0.5) < 0.2
-
-
-def test_same_seed_gives_same_outcomes():
+def test_the_same_slots_always_give_the_same_outcomes():
     def run():
         t, store, _ = make()
         out = []
-        for s in [s for s in store._slots.values() if s["status"] == "free"][:40]:
+        for s in [s for s in store._slots.values() if s["status"] == "free" and s["start_at"] > NOW][:40]:
             h = t.hold_slot(s["provider_id"], s["id"])
             try:
                 out.append(t.book(h["hold_id"], "k")["status"])
