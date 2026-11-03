@@ -229,11 +229,11 @@ def test_replacement_taken_while_the_user_was_away_falls_back_or_says_so():
     assert r.approval_card is None and "gone" in r.reply and len(h.bookings()) == 5
 
 
-def test_proposal_respects_budget_if_the_price_drifted_while_away():
+def test_proposal_stops_if_the_final_price_is_absurdly_above_the_listed_one():
     h = world(price_drift_prob=1.0, price_drift=900)
     _, s = notified(h)
     r = h.o.open_proposal("user_demo", s["id"])
-    assert r.approval_card is None and "above your" in r.reply
+    assert r.approval_card is None and "far above the listed" in r.reply
     assert all(x["status"] == "released" for x in h.store._holds.values())  # priced, then let go
     assert h.store.slot(s["request_frame"]["_suggestion"]["slot_id"])["status"] == "free"
     assert h.app.approval is not None and not h.app._approvals

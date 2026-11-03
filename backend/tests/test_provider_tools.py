@@ -126,7 +126,7 @@ def test_timeout_without_booking_then_retry_succeeds():
 
 def test_book_outcome_mix_is_about_70_15_15_and_half_of_timeouts_booked():
     t, store, _ = make()
-    slots = [s for s in store._slots.values() if s["status"] == "free"]
+    slots = [s for s in store._slots.values() if s["status"] == "free" and s["start_at"] > NOW]  # today's early slots are past
     counts = {"success": 0, "slot_taken": 0, "timeout": 0}
     timeout_booked = 0
     for i, s in enumerate(slots):
@@ -147,7 +147,7 @@ def test_same_seed_gives_same_outcomes():
     def run():
         t, store, _ = make()
         out = []
-        for s in [s for s in store._slots.values() if s["status"] == "free"][:40]:
+        for s in [s for s in store._slots.values() if s["status"] == "free" and s["start_at"] > NOW][:40]:
             h = t.hold_slot(s["provider_id"], s["id"])
             try:
                 out.append(t.book(h["hold_id"], "k")["status"])

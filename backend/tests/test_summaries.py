@@ -94,7 +94,7 @@ def test_without_a_summary_the_budget_trims_old_turns_and_keeps_the_newest():
     from app.llm import ScriptedLLM
     from app.tools.store import InMemoryStore
     tools_tokens = Orchestrator(InMemoryAppStore(), InMemoryStore(), FixedClock(NOW), ScriptedLLM([])).tools_tokens
-    budget = tools_tokens + 700
+    budget = tools_tokens + 1100
     h = H(budget=budget)
     h.o.summarizer.trigger = 10_000  # keep the summarizer out of this test
     sid = long_chat(h, 40)
