@@ -14,10 +14,13 @@ import {
   setCardState,
   setChat,
   setMemoryState,
+  setPicked,
   startNewErrand,
   useChat,
 } from "@/lib/chat";
+import { extractOptions, splitAroundList } from "@/lib/options";
 import { signOut, useSession } from "@/lib/session";
+import { SlotPicker } from "@/components/chat/SlotPicker";
 import { Sidebar } from "@/components/chat/Sidebar";
 import { ProposalCard } from "@/components/chat/ProposalCard";
 import { MemoryPromptCard } from "@/components/chat/MemoryPrompt";
@@ -144,6 +147,8 @@ export default function ChatPage() {
   const atLimit = !plus && errands.length >= FREE_LIMIT;
   const first = session.name.split(" ")[0];
   const pending = [...items].reverse().find((i) => i.kind === "card" && i.state === "pending");
+  // Only the newest picker is live; older ones are history.
+  const lastPickerId = [...items].reverse().find((i) => i.kind === "agent" && i.options)?.id;
 
   async function approve(card: ApprovalCard) {
     if (card.action === "book") {
@@ -210,7 +215,16 @@ export default function ChatPage() {
         forgetSession();
         res = await api.chat(session!.userId, text, null);
       }
-      recordChat(res);
+      // "Show me slots" comes back as prose. The search behind it is in the run trace, structured:
+      // fetch it so the thread can show a real provider / rating / slots picker.
+      const options =
+        res.run_id && !res.approval_card
+          ? await api
+              .trace(res.run_id)
+              .then((t) => extractOptions(t.spans))
+              .catch(() => null)
+          : null;
+      recordChat(res, options);
     } catch (e) {
       addItem({ kind: "error", text: errText(e) });
     } finally {
@@ -311,10 +325,32 @@ export default function ChatPage() {
                       </p>
                     )}
                     {m.kind === "agent" && (
-                      <div className="rise">
-                        <p className="w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-raised px-4 py-2.5">
-                          {m.text}
-                        </p>
+                      <div className="rise space-y-2">
+                        {(() => {
+                          // With a picker, the model's numbered list is redundant: show its intro, the picker, then its question.
+                          const { before, after } = m.options ? splitAroundList(m.text) : { before: m.text, after: "" };
+                          const bubble = (t: string) => (
+                            <p className="w-fit max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-sm bg-raised px-4 py-2.5">
+                              {t}
+                            </p>
+                          );
+                          return (
+                            <>
+                              {before && bubble(before)}
+                              {m.options && (
+                                <SlotPicker
+                                  options={m.options}
+                                  active={m.id === lastPickerId && !m.options.picked && !thinking}
+                                  onConfirm={(p, s) => {
+                                    setPicked(m.id, { providerId: p.id, slotId: s.id });
+                                    void send(`Book ${p.name} on ${s.label}`);
+                                  }}
+                                />
+                              )}
+                              {after && bubble(after)}
+                            </>
+                          );
+                        })()}
                         {m.runId && (
                           <button
                             onClick={() => setTrace(m.runId!)}

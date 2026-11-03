@@ -81,6 +81,9 @@ export type Span = {
   tokens_out?: number | null;
   cost_usd?: number | null;
   error?: string | null;
+  input?: unknown;
+  /** tool_call spans carry the tool's result, e.g. the provider search matches. */
+  output?: unknown;
 };
 
 export class ApiError extends Error {

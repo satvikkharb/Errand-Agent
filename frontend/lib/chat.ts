@@ -3,6 +3,7 @@
 import { useSyncExternalStore } from "react";
 import type { ApprovalCard, ChatResult, MemoryPrompt } from "@/lib/api";
 import { bookingKey, parseCard } from "@/lib/cards";
+import type { AgentOptions } from "@/lib/options";
 
 // Client-side chat state, persisted in localStorage so a reload resumes the same backend session.
 // It is a view over what the backend returned (replies, approval cards, memory prompts), plus a
@@ -13,7 +14,7 @@ export type CardState = "pending" | "approved" | "processing" | "declined" | "fa
 
 export type Item =
   | { id: string; kind: "user"; text: string }
-  | { id: string; kind: "agent"; text: string; runId?: string | null }
+  | { id: string; kind: "agent"; text: string; runId?: string | null; options?: AgentOptions }
   | { id: string; kind: "notice"; text: string }
   | { id: string; kind: "error"; text: string }
   | { id: string; kind: "card"; card: ApprovalCard; state: CardState }
@@ -90,13 +91,19 @@ export const addItem = (item: NewItem) =>
   setChat((s) => ({ ...s, items: [...s.items, { id: uid(), ...item } as Item] }));
 
 /** Turns a backend ChatResult into chat items, in the order a person should read them. */
-function withResult(s: ChatState, res: ChatResult, opts: { supersede: boolean }): ChatState {
+function withResult(
+  s: ChatState,
+  res: ChatResult,
+  opts: { supersede: boolean; options?: AgentOptions | null },
+): ChatState {
   const add: Item[] = [];
   for (const n of res.notices ?? []) add.push({ id: uid(), kind: "notice", text: n });
   for (const v of res.user_views ?? []) {
     if (typeof v === "string") add.push({ id: uid(), kind: "agent", text: v });
   }
-  if (res.reply) add.push({ id: uid(), kind: "agent", text: res.reply, runId: res.run_id });
+  if (res.reply) {
+    add.push({ id: uid(), kind: "agent", text: res.reply, runId: res.run_id, options: opts.options ?? undefined });
+  }
 
   const card = res.approval_card;
   const known = card && s.items.some((i) => i.kind === "card" && i.card.approval_id === card.approval_id);
@@ -112,8 +119,18 @@ function withResult(s: ChatState, res: ChatResult, opts: { supersede: boolean })
   return { ...s, sessionId: res.session_id ?? s.sessionId, items: [...items, ...add] };
 }
 
-export const recordChat = (res: ChatResult) =>
-  setChat((s) => withResult(s, res, { supersede: true }));
+export const recordChat = (res: ChatResult, options?: AgentOptions | null) =>
+  setChat((s) => withResult(s, res, { supersede: true, options }));
+
+/** The user confirmed a provider + slot on a picker: keep it highlighted and read-only. */
+export function setPicked(itemId: string, picked: { providerId: string; slotId: string }) {
+  setChat((s) => ({
+    ...s,
+    items: s.items.map((i) =>
+      i.id === itemId && i.kind === "agent" && i.options ? { ...i, options: { ...i.options, picked } } : i,
+    ),
+  }));
+}
 
 export function setCardState(approvalId: string, state: CardState) {
   setChat((s) => ({
