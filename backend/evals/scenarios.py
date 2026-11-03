@@ -34,7 +34,7 @@ def open_ac_slots(env):
             env.store.set_slot_status(f"{p}_1105_{h}", "free")
 
 
-def block(env, provider, days=("1105",), hours=("09", "11", "14", "16")):
+def block(env, provider, days=("1105",), hours=("09", "11", "14", "16", "18")):
     for d in days:
         for h in hours:
             env.store.set_slot_status(f"{provider}_{d}_{h}", "booked")
@@ -926,3 +926,53 @@ def _(t):
     u2.says("Move it to Friday instead", call("get_availability", provider_id="ac_01", date_start="2026-11-06", date_end="2026-11-06"),
             call("propose_reschedule", booking_id="bk_004", slot_id=fri))
     t.check("Friday works", u2.taps_approve().reply.startswith("Rescheduled and verified"), True)
+
+
+# ======================================================================== the provider table
+_WEEK = dict(area="Koramangala", date_start="2026-11-09", date_end="2026-11-15", budget_max=2000)
+
+
+@scenario("table-lists-every-slot-and-a-tap-needs-no-model", "Provider table",
+          "A search returns EVERY available slot in the period as data, and tapping one goes straight to the approval card without the model.",
+          covers=("context-budget",), notes="Found live: the model's own list showed only a few slots, and 'show me the slots' answered 'none'.")
+def _(t):
+    env = t.env()
+    u = env.user()
+    r = u.says("My plumber in Koramangala next week", fill(window_start="12:00", window_end="18:00", **_WEEK), say("Found three, I'd pick the top one."))
+    ids = {m["id"] for m in r.options["matches"]}
+    free = [s for s in env.store._slots.values() if s["provider_id"] in ids and s["status"] == "free"
+            and "2026-11-09" <= s["start_at"].date().isoformat() <= "2026-11-15" and s["start_at"].astimezone(IST).hour in (14, 16)]
+    t.check("every free slot in the window is in the table", sum(len(m["slots"]) for m in r.options["matches"]), len(free))
+    t.check("spans the whole week", len({s["day"] for m in r.options["matches"] for s in m["slots"]}) >= 5, True)
+    t.check("nothing is relaxed", r.options["relaxed"], [])
+    calls = len(env.script.calls)
+    m, s = r.options["matches"][1], r.options["matches"][1]["slots"][3]
+    tap = env.o.select_slot("user_demo", u.sid, m["id"], s["id"])
+    t.check("a tap makes no model call", len(env.script.calls), calls)
+    t.check("a tap gives the checkout card and marks the bubble", (bool(tap.approval_card), tap.options["selected"]),
+            (True, {"provider_id": m["id"], "slot_id": s["id"]}))
+    t.check("a tap is not a booking", len(env.new_bookings()), 0)
+    u.last = tap
+    t.check("approving books exactly the tapped slot", (u.taps_approve().reply.startswith("Booked and verified"),
+                                                         (env.new_bookings()[0]["provider_id"], env.new_bookings()[0]["slot_id"])),
+            (True, (m["id"], s["id"])))
+
+
+@scenario("tight-window-shows-what-exists-and-says-so", "Provider table",
+          "When nothing fits the user's time window they are shown the slots that exist, marked as outside the window, and their request is not changed behind their back.",
+          covers=("slot-conflict",), notes="Found live: 'after 6 pm' returned an empty answer; the user only wanted to see availability.")
+def _(t):
+    env = t.env()
+    u = env.user()
+    r = u.says("An AC after 9 pm next week", fill(service="ac_servicing", window_start="21:00", window_end="23:59", **_WEEK), say("Nothing after 9 pm, here is what exists."))
+    o = r.options
+    t.check("flagged as outside the window", (o["relaxed"], any(s["in_window"] for m in o["matches"] for s in m["slots"])), (["time_window"], False))
+    t.check("the table is not empty", len(o["matches"]) >= 1 and all(m["slots"] for m in o["matches"]), True)
+    t.check("their request was not relaxed", (env.frame()["window_start"], env.frame()["budget_max"]), ("21:00", 2000))
+    t.check("the request reads naturally", o["request"]["time_text"], "after 9 pm")
+    m, s = o["matches"][0], o["matches"][0]["slots"][0]
+    chosen = env.o.select_slot("user_demo", u.sid, m["id"], s["id"])
+    t.check("they can still choose one themselves", bool(chosen.approval_card), True)
+    bad = env.o.select_slot("user_demo", u.sid, m["id"], "ac_04_1120_09")
+    t.check("an unlisted slot is refused and the earlier card is left alone",
+            ("no longer available" in bad.reply, bad.approval_card["approval_id"] == chosen.approval_card["approval_id"]), (True, True))

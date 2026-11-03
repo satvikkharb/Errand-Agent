@@ -17,7 +17,8 @@ Prices: the price you quote is the service price from the tool results, and you 
 How you work
 - Record what the user tells you with update_request_frame. Send only new or corrected fields. Never ask again for something already in the saved request or in the stored preferences. If the tool reports missing or partial fields, ask for ALL of them in one short message.
 - If update_request_frame reports from_saved_preferences, tell the user briefly what you assumed (for example "I used your saved area") so they can correct it.
-- When nothing is missing, update_request_frame already returns the search results under "search": compare them briefly (price, rating, a time) and recommend one with a reason. Call search_providers only to search again. Never describe providers, prices or times that did not come from a tool result.
+- When nothing is missing, update_request_frame already returns the search results under "search". The app shows the user a TABLE of every match with ALL its available slots to tap, so do not list providers or slots in your text. Write one or two short sentences: how many options you found, which one you recommend and why, and ask them to pick a slot from the table. Call search_providers only to search again. Never describe providers, prices or times that did not come from a tool result.
+- If the user asks to see the slots or availability, call search_providers with show_all_times=true so the table lists every available slot in their dates. If the result says "relaxed", say plainly which request was not met (for example "nothing is free after 6 pm") and that the table shows what is available instead. Do not relax anything yourself.
 - To act, call propose_book, propose_cancel or propose_reschedule. They only show an approval card. You cannot book, cancel or reschedule yourself. Never say or imply that something is booked, cancelled or moved: the user's Approve button does that and the system reports the result.
 - If there are no matches, say which constraint blocked them and ask which to relax. Never relax a constraint yourself.
 - When the user agrees to change a constraint so that a slot they already chose can be booked, apply the change with update_request_frame and then propose that SAME slot in the same turn. Never ask for the same confirmation twice, and treat "yes", "proceed", "go ahead" or "this only" as that confirmation.
@@ -52,10 +53,13 @@ def render_search(frame: dict) -> str | None:
     s = frame.get("_search")
     if not s or not s.get("slots"):
         return None
-    lines = ["Latest search results (the only providers/slots you may propose; ids are exact):"]
+    lines = ["Latest search results (the only providers/slots you may propose; ids are exact; the user sees ALL "
+             "slots in a table they can tap)" + (f" [window not met: {', '.join(s['relaxed'])}]" if s.get("relaxed") else "") + ":"]
     for i, (pid, slots) in enumerate(s["slots"].items(), 1):
-        times = ", ".join(f"{sid} ({_fmt(s['times'][sid])})" for sid in slots[:6])
-        lines.append(f"{i}. {s['names'][pid]} id={pid} ₹{s['prices'][pid]} rating {s['ratings'][pid]} | slots: {times}")
+        shown = ", ".join(f"{sid} ({_fmt(s['times'][sid], s.get('ends', {}).get(sid))})" for sid in slots[:6])
+        more = s.get("totals", {}).get(pid, len(slots)) - len(slots[:6])
+        lines.append(f"{i}. {s['names'][pid]} id={pid} ₹{s['prices'][pid]} rating {s['ratings'][pid]} | slots: {shown}"
+                     + (f" (+{more} more; get_availability lists them)" if more > 0 else ""))
     return "\n".join(lines)
 
 

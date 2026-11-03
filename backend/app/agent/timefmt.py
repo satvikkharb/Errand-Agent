@@ -44,6 +44,8 @@ def hhmm_text(hhmm: str) -> str:
 
 
 def window_text(start: str | None, end: str | None, any_time: bool = False) -> str | None:
+    if end in ("23:59", "24:00"):  # "until midnight" is just "after X"
+        end = None
     if start and end:
         return f"{hhmm_text(start)} to {hhmm_text(end)}"
     if start:

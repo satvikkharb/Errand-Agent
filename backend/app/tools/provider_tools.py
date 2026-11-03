@@ -15,7 +15,7 @@ from app.tools.errors import ToolTimeout, ToolUnavailable
 from app.tools.store import Store
 
 MAX_PROVIDERS = 8
-MAX_SLOTS_PER_PROVIDER = 10
+MAX_SLOTS_PER_PROVIDER = 60  # a full fortnight of slots is 15 days x 5 windows
 
 
 def _to_dt(v, end: bool = False) -> datetime:
