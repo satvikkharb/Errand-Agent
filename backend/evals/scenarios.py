@@ -871,3 +871,58 @@ def _(t):
     t.check("the old card books nothing", u.taps_approve(card).reply.startswith("That card is out of date"), True)
     t.check("no booking, no attempt", (len(env.new_bookings()), len(env.attempts())), (0, 0))
     t.check("the chat is closed", env.o.handle_message("user_demo", "hello", u.sid).exit_reason, "not_found")
+
+
+# ======================================================================== demo days (no switch: the day decides)
+def _day_flow(t, day: int, window=("09:00", "18:00")):
+    """Book the top plumber on one of the seeded days with NO test hooks: only the day schedule is in play."""
+    env = t.env(forced=(), drift=None)
+    u = env.user()
+    u.says("A plumber please", fill(date_start=f"2026-11-{day:02d}", window_start=window[0], window_end=window[1]),
+           say("Here are your options."))
+    u.says("Book the top one", env.propose())
+    return env, u, u.taps_approve()
+
+
+@scenario("demo-days-decide-the-flow", "Demo days",
+          "With no switch anywhere, the day you book decides what happens: today works, tomorrow times out but booked, the day after is taken, Thursday adds fees, Friday retries, Sunday never confirms.",
+          covers=("timeout-after-success", "slot-conflict"),
+          notes="Same service and request every time. Only the date differs.")
+def _(t):
+    env, u, out = _day_flow(t, 2, window=("11:00", "18:00"))
+    t.check("today: books cleanly", (out.reply.startswith("Booked and verified"), len(env.new_bookings())), (True, 1))
+    env, u, out = _day_flow(t, 3)
+    t.check("tomorrow: the call timed out, the status check found the booking",
+            (env.spans("tool_call", "exec.book")[0]["error"], out.reply.startswith("Booked and verified"), len(env.new_bookings())),
+            ("ToolTimeout", True, 1))
+    env, u, out = _day_flow(t, 4)
+    t.check("day after: slot taken, nothing booked", ("just taken" in out.reply, len(env.new_bookings())), (True, 0))
+    env, u, out = _day_flow(t, 5)
+    p = env.app.approval(env.attempts()[0]["approval_id"])["payload"]
+    t.check("Thursday: quote is Rs 250 above the listed price", p["price"] - p["search_price"], 250)
+    t.check("Thursday: receipt separates taxes and fees", "plus taxes and fees" in out.reply, True)
+    env, u, out = _day_flow(t, 6)
+    calls = env.spans("tool_call", "exec.book")
+    t.check("Friday: timed out once, retried with the same key, one booking",
+            (len(calls), len({c["input"]["args"][1] for c in calls}), len(env.new_bookings())), (2, 1, 1))
+    env, u, out = _day_flow(t, 8)
+    t.check("Sunday: never confirms, never claims success", ("Booked" in out.reply, out.state, env.attempts()[0]["status"]),
+            (False, "RECONCILE", "unknown"))
+
+
+@scenario("saturday-reschedule-always-conflicts", "Demo days",
+          "Moving a booking to a Saturday slot always conflicts (even though the slot is free) and leaves the original untouched; other days work.",
+          covers=("slot-conflict",))
+def _(t):
+    env = t.env(forced=(), drift=None)
+    u = env.user()
+    sat = env.store.free_slots("ac_01", datetime(2026, 11, 7, tzinfo=IST), datetime(2026, 11, 8, tzinfo=IST))[0]["id"]
+    u.says("Move my AC servicing to Saturday", call("get_availability", provider_id="ac_01", date_start="2026-11-07", date_end="2026-11-07"),
+           call("propose_reschedule", booking_id="bk_004", slot_id=sat))
+    out = u.taps_approve()
+    t.check("conflict reported, original unchanged", ("unchanged" in out.reply, env.store.booking("bk_004")["slot_id"]), (True, "ac_01_1105_14"))
+    fri = env.store.free_slots("ac_01", datetime(2026, 11, 6, tzinfo=IST), datetime(2026, 11, 7, tzinfo=IST))[0]["id"]
+    u2 = env.user("user_demo")
+    u2.says("Move it to Friday instead", call("get_availability", provider_id="ac_01", date_start="2026-11-06", date_end="2026-11-06"),
+            call("propose_reschedule", booking_id="bk_004", slot_id=fri))
+    t.check("Friday works", u2.taps_approve().reply.startswith("Rescheduled and verified"), True)

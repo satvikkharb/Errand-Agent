@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     state_backend: str = "memory"  # memory | supabase
     cron_secret: str = ""  # Authorization: Bearer <this> on /internal/tick (Vercel Cron sends it)
     dev_endpoints: bool = False  # enables /dev/simulate/*
-    scenario_mode: str = "random"  # random: the 70/15/15 booking outcomes | happy: every booking succeeds, no price change
     # "Now" for the simulation. The data is seeded for 2 Nov 2026, so that is "today" by default, running in real time
     # from 10:00 IST. SIM_NOW=system uses the machine clock; SIM_FREEZE=true stops the clock (holds never expire).
     sim_now: str = "2026-11-02T10:00:00+05:30"

@@ -1,5 +1,4 @@
 """Wires the app together. STATE_BACKEND=supabase persists everything; memory is for local tests and demos."""
-from dataclasses import replace
 from datetime import datetime
 from functools import lru_cache
 
@@ -11,7 +10,6 @@ from app.agent.supabase_app_store import SupabaseAppStore
 from app.clock import FixedClock, OffsetClock, SystemClock
 from app.config import get_settings
 from app.llm import OpenAILLM
-from app.tools.config import ScenarioConfig
 from app.tools.store import InMemoryStore
 from app.tools.supabase_store import SupabaseStore
 
@@ -27,14 +25,6 @@ def make_clock(settings):
     return FixedClock(start) if settings.sim_freeze else OffsetClock(start)
 
 
-def scenario_config(settings, store) -> ScenarioConfig | None:
-    """SCENARIO_MODE=happy: every booking succeeds and quotes match search prices, for a clean first demo.
-    Otherwise None: the simulator keeps the assignment's seeded 70/15/15 outcomes (tunable in scenario_config)."""
-    if settings.scenario_mode != "happy":
-        return None
-    return replace(ScenarioConfig.from_row(store.config()), price_drift_prob=0.0, forced_book_outcomes=("success",))
-
-
 @lru_cache
 def get_orchestrator() -> Orchestrator | None:
     s = get_settings()
@@ -47,7 +37,7 @@ def get_orchestrator() -> Orchestrator | None:
         app, store = InMemoryAppStore(), InMemoryStore()
         seed_demo(app, clock.now())
     o = Orchestrator(app, store, clock, OpenAILLM(s.openai_api_key, s.openai_model),
-                     builder=ContextBuilder(s.context_budget_tokens), tools_config=scenario_config(s, store),
+                     builder=ContextBuilder(s.context_budget_tokens),
                      price_in_per_1m=s.price_in_per_1m, price_out_per_1m=s.price_out_per_1m, llm_titles=True)
     o.recover()  # finish anything a previous process left half-done
     return o
