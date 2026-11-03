@@ -1,3 +1,5 @@
+import copy
+import time
 from datetime import datetime, timedelta
 
 from app.db import get_db
@@ -23,6 +25,7 @@ class SupabaseStore:
 
     def __init__(self, db=None):
         self._db = db
+        self._ref: dict = {}
 
     @property
     def db(self):  # resolved per use so each thread gets its own client
@@ -39,13 +42,23 @@ class SupabaseStore:
         return self._one(self._t("scenario_config").select("*").eq("scenario", "default"))
 
     def areas(self):
-        return sorted({r["area"] for r in self._t("providers").select("area").execute().data})
+        return self._ttl("areas", lambda: sorted({r["area"] for r in self._t("providers").select("area").execute().data}))
+
+    def _ttl(self, key, load, seconds: float = 300):
+        """Provider reference data changes rarely: keep it for a few minutes instead of asking on every request."""
+        now = time.monotonic()
+        hit = self._ref.get(key)
+        if hit and now - hit[0] < seconds:
+            return copy.deepcopy(hit[1])
+        value = load()
+        self._ref[key] = (now, copy.deepcopy(value))
+        return value
 
     def providers(self, service, area):
         return self._t("providers").select("*").eq("service", service).ilike("area", area).execute().data
 
     def provider(self, pid):
-        return self._one(self._t("providers").select("*").eq("id", pid))
+        return self._ttl(f"provider:{pid}", lambda: self._one(self._t("providers").select("*").eq("id", pid)), 60)
 
     def reviews(self, pid):
         return self._t("reviews").select("author,text").eq("provider_id", pid).execute().data

@@ -6,6 +6,7 @@ from typing import Any
 import logging
 
 import httpx
+import psycopg
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -22,7 +23,7 @@ app = FastAPI(title="Errand Agent")
 async def unexpected_error(request: Request, exc: Exception):
     """Never hand the frontend a bare text 500. A network or storage outage is a 503 it can show and retry."""
     log.exception("unhandled error on %s %s", request.method, request.url.path)
-    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError)):
+    if isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError, psycopg.OperationalError)):
         return JSONResponse(status_code=503, content={"detail": "A service the app depends on is temporarily unreachable. "
                                                               "Please try again in a moment.", "retryable": True})
     return JSONResponse(status_code=500, content={"detail": "Something went wrong on our side.", "retryable": False})

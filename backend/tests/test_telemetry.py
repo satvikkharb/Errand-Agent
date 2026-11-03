@@ -13,6 +13,14 @@ from tests.support.fake_langsmith import FakeLangSmith
 from tests.test_orchestrator import FIRST_MSG, H, find_steps
 
 
+@pytest.fixture(autouse=True)
+def _no_real_langsmith_env(monkeypatch):
+    """Settings reads the process environment too: never let a developer's real keys change what these tests see."""
+    for k in ("LANGSMITH_TRACING", "LANGSMITH_API_KEY", "LANGSMITH_PROJECT", "LANGSMITH_ENDPOINT",
+              "LANGSMITH_WORKSPACE_ID", "LANGSMITH_SEND_PROMPTS"):
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture
 def ls():
     fs = FakeLangSmith()
