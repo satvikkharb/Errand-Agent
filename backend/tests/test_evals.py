@@ -72,3 +72,12 @@ def test_every_scenario_passes_with_no_credentials_in_the_environment(monkeypatc
 
 def test_the_table_says_the_run_was_offline():
     assert "network access is blocked" in (OUT / "EVAL_TABLE.md").read_text()
+
+
+def test_the_readme_eval_table_is_the_one_this_run_generated(results):
+    """The README table must be the generated one: nobody can edit it by hand and have the suite stay green."""
+    from evals.harness import README_END, README_START, render_scenarios
+
+    readme = (OUT.parents[2] / "README.md").read_text()
+    shown = readme.split(README_START, 1)[1].split(README_END, 1)[0]
+    assert shown == "\n" + render_scenarios(results, title=None)
