@@ -9,6 +9,7 @@ dependencies = [
     "supabase>=2.8",
     "openai>=1.50",
     "langsmith>=0.14.17",
+    "psycopg[binary,pool]>=3.3.7",
 ]
 
 [dependency-groups]

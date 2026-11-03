@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_service_role_key: str = ""
+    supabase_db_url: str = ""  # direct Postgres connection string (percent-encode special characters in the password)
+    db_access: str = "postgres"  # postgres = direct pooled connection (fast) | rest = Supabase REST API
     openai_api_key: str = ""
     openai_model: str = "gpt-4.1-mini"
     # LangSmith tracing (off unless LANGSMITH_TRACING=true AND an API key is set). See docs/langsmith.md.
