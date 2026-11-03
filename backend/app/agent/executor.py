@@ -37,6 +37,12 @@ _SUCCESS = {"booked", "cancelled", "rescheduled"}
 _BACK_TO_SEARCH = {"slot_taken", "hold_expired", "slot_conflict", "failed", "already_cancelled"}
 
 
+def _who(p: dict) -> str:
+    """"**plumber** with **PipeMasters**": what the customer should be able to spot at a glance (the app shows ** as bold)."""
+    service = str(p.get("service") or "").replace("_", " ")
+    return f"**{service}** with **{p['provider_name']}**" if service else f"**{p['provider_name']}**"
+
+
 class Executor:
     def __init__(self, deps: Deps, sleep=time.sleep, max_retries: int = 2):
         self.d, self.sleep, self.max_retries = deps, sleep, max_retries
@@ -51,8 +57,20 @@ class Executor:
         except ApprovalNotConsumable:
             return ExecResult("failed", "That approval can't be used any more (already used, changed or expired), "
                                         "so I did nothing.")
-        self._move(approval["session_id"], "EXECUTE")
+        self._enter_execute(approval["session_id"])
         return self._execute(approval, attempt, check_first=False)
+
+    def _enter_execute(self, sid: str) -> None:
+        """approve() has already checked the card is pending, unexpired and untampered. That approval is the authority
+        to act, not the conversation's current state: the user may have kept chatting while the card was on screen
+        (so the state is no longer AWAIT_APPROVAL). Record the move and carry on; crashing here would leave an
+        approval consumed and nothing done."""
+        try:
+            self._move(sid, "EXECUTE")
+        except states.InvalidTransition:
+            frm = self.d.app.session(sid)["state"]
+            self.d.app.update_session(sid, state="EXECUTE")
+            self.d.tracer.span("state_transition", f"{frm}->EXECUTE", error="forced: the approval is valid")
 
     def resume(self, approval: dict, attempt: dict) -> ExecResult:
         """Finish an attempt left unresolved by a crash or an unclear outcome. Asks the source of truth first."""
@@ -134,7 +152,7 @@ class Executor:
         p = a["payload"]
         paid = f"₹{st['price']}" if st["price"] == p["search_price"] else \
             f"₹{st['price']} in total (₹{p['search_price']} service plus taxes and fees)"
-        return ExecResult("booked", f"Booked and verified: {p['provider_name']}, {_fmt(p['slot_start'], p.get('slot_end'))}, "
+        return ExecResult("booked", f"Booked and verified: {_who(p)}, **{_fmt(p['slot_start'], p.get('slot_end'))}**, "
                                     f"{paid}. Booking ID {st['booking_id']}.", st["booking_id"])
 
     # ---------------------------------------------------------------- cancel
@@ -161,13 +179,13 @@ class Executor:
 
     @staticmethod
     def _cancelled(p: dict) -> ExecResult:
-        return ExecResult("cancelled", f"Cancelled and verified: {p['provider_name']}, {_fmt(p['slot_start'])}.",
+        return ExecResult("cancelled", f"Cancelled and verified: {_who(p)}, **{_fmt(p['slot_start'])}**.",
                           p["booking_id"])
 
     # ------------------------------------------------------------ reschedule
     def _reschedule(self, a: dict, att: dict, check_first: bool) -> ExecResult:
         p, key = a["payload"], att["idempotency_key"]
-        done = ExecResult("rescheduled", f"Rescheduled and verified: {p['provider_name']}, now {_fmt(p['to_start'])}.",
+        done = ExecResult("rescheduled", f"Rescheduled and verified: {_who(p)}, now **{_fmt(p['to_start'])}**.",
                           p["booking_id"])
         if check_first and self._applied(key, "rescheduled"):
             return done

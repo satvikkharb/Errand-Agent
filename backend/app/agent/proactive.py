@@ -93,8 +93,9 @@ def choose_slot(frame: dict, original_start: str, prefer: tuple[str, str] | None
 
 
 class ProactiveProcessor:
-    def __init__(self, app, store, clock, deps_factory):
+    def __init__(self, app, store, clock, deps_factory, telemetry=None):
         self.app, self.store, self.clock, self.deps_factory = app, store, clock, deps_factory
+        self.telemetry = telemetry
 
     # ------------------------------------------------------------ one event
     def process_safe(self, ev: dict) -> dict:
@@ -134,6 +135,9 @@ class ProactiveProcessor:
         self.app.set_title(session["id"], f"{booking['service'].replace('_', ' ').capitalize()}: provider cancelled", "system")
         run = self.app.create_run(session["id"], "event", now + timedelta(seconds=45), now)
         tracer = AppTracer(self.app, run["id"])
+        if self.telemetry:
+            tracer = self.telemetry.wrap(tracer, name=f"event:{ev['type']}", run_id=run["id"], session_id=session["id"],
+                                         user_id=user_id, inputs={"event": ev["type"], "booking_id": booking["id"]})
         tracer.span("event", ev["type"], input={"event_id": ev["id"], "booking_id": booking["id"]},
                     output={"decision": asdict(decision)})
         suggestion, budget = None, RunBudget(self.clock, max_turns=1, max_tool_calls=12, reserve_for_reconcile=0)
@@ -148,6 +152,9 @@ class ProactiveProcessor:
         self.store.update_event(ev["id"], status="done", processed_at=now, run_id=run["id"])
         self.app.update_run(run["id"], status="done", exit_reason="done", final_message=body, ended_at=now,
                             turns=0, tool_calls=budget.tool_calls)
+        if hasattr(tracer, "finish"):
+            tracer.finish({"notification": body, "has_replacement": suggestion is not None, "urgency": decision.urgency},
+                          metadata={"tool_calls": budget.tool_calls})
         return {"event_id": ev["id"], "outcome": "notified", "session_id": session["id"], "run_id": run["id"],
                 "notification_id": note["id"], "urgency": decision.urgency, "has_replacement": suggestion is not None,
                 "body": body}

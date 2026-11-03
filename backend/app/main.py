@@ -154,6 +154,12 @@ def _locked(o, user_id: str):
         o.app.release_lock(user_id)
 
 
+@app.get("/bookings")
+def bookings(user_id: str):
+    """The user's upcoming confirmed bookings: what is really booked, not what any chat remembers."""
+    return {"bookings": _orch().my_bookings(user_id)}
+
+
 @app.get("/memories")
 def memories(user_id: str):
     return {"memories": _orch().memory.list_for_user(user_id)}

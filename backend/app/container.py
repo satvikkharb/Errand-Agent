@@ -7,6 +7,7 @@ from app.agent.context import ContextBuilder
 from app.agent.orchestrator import Orchestrator
 from app.agent.seed import seed_demo
 from app.agent.supabase_app_store import SupabaseAppStore
+from app.agent.telemetry import Telemetry
 from app.clock import FixedClock, OffsetClock, SystemClock
 from app.config import get_settings
 from app.llm import OpenAILLM
@@ -36,8 +37,10 @@ def get_orchestrator() -> Orchestrator | None:
     else:
         app, store = InMemoryAppStore(), InMemoryStore()
         seed_demo(app, clock.now())
-    o = Orchestrator(app, store, clock, OpenAILLM(s.openai_api_key, s.openai_model),
+    llm = OpenAILLM(s.openai_api_key, s.openai_model)
+    o = Orchestrator(app, store, clock, llm, memory_llm=llm,
                      builder=ContextBuilder(s.context_budget_tokens),
-                     price_in_per_1m=s.price_in_per_1m, price_out_per_1m=s.price_out_per_1m, llm_titles=True)
+                     price_in_per_1m=s.price_in_per_1m, price_out_per_1m=s.price_out_per_1m, llm_titles=True,
+                     telemetry=Telemetry.from_settings(s))
     o.recover()  # finish anything a previous process left half-done
     return o

@@ -85,7 +85,9 @@ class TitleService:
             if tracer:
                 tracer.span("model_call", f"{r.model}:title", input={"messages": len(msgs)},
                             output={"content": (r.content or "")[:100]}, latency_ms=int((time.perf_counter() - t0) * 1000),
-                            tokens_in=r.usage.prompt_tokens, tokens_out=r.usage.completion_tokens)
+                            tokens_in=r.usage.prompt_tokens, tokens_out=r.usage.completion_tokens,
+                            ls_messages=[{"role": "system", "content": TITLE_SYSTEM}, {"role": "user", "content": convo}],
+                            ls_output={"content": r.content})
             title = clean_title(r.content or "")
             if title:
                 self.app.set_title(session_id, title, "llm")

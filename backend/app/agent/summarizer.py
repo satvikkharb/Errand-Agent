@@ -51,7 +51,9 @@ class Summarizer:
             if tracer:
                 tracer.span("model_call", f"{r.model}:summarizer", input={"messages": len(chunk)},
                             output={"content": (r.content or "")[:200]}, latency_ms=int((time.perf_counter() - t0) * 1000),
-                            tokens_in=r.usage.prompt_tokens, tokens_out=r.usage.completion_tokens)
+                            tokens_in=r.usage.prompt_tokens, tokens_out=r.usage.completion_tokens,
+                            ls_messages=[{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+                            ls_output={"content": r.content})
             text, flagged = clean_text((r.content or "").strip(), 900)
             if text and not flagged:
                 return text, "llm"

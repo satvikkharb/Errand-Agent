@@ -32,5 +32,6 @@ class AppTracer:
         self.app, self.run_id = app, run_id
 
     def span(self, kind, name, input=None, output=None, latency_ms=None, error=None, **extra):
+        extra = {k: v for k, v in extra.items() if not k.startswith("ls_")}  # ls_* = prompt text for LangSmith only
         self.app.add_span(self.run_id, {"kind": kind, "name": name, "input": input, "output": output,
                                         "latency_ms": latency_ms, "error": error, **extra})
