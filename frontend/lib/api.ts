@@ -40,6 +40,8 @@ export type ChatResult = {
   notices: string[];
   busy: boolean;
   memory_prompt: MemoryPrompt | null;
+  /** Conversation title, set by the backend (added with the /conversations endpoints). */
+  title?: string | null;
 };
 
 export type Notification = {

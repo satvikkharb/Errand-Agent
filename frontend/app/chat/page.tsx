@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { api, type ApprovalCard, type Notification } from "@/lib/api";
+import { api, ApiError, type ApprovalCard, type Notification } from "@/lib/api";
 import {
   addItem,
   ensureUser,
   recordApproval,
   recordChat,
   recordReject,
+  forgetSession,
   resetChat,
   setCardState,
   setChat,
@@ -92,7 +93,9 @@ export default function ChatPage() {
           }
         }
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (live && e instanceof ApiError && e.status === 404) forgetSession();
+      });
     return () => {
       live = false;
     };
@@ -200,7 +203,14 @@ export default function ChatPage() {
 
     setThinking(true);
     try {
-      recordChat(await api.chat(session!.userId, text, chat.sessionId));
+      let res = await api.chat(session!.userId, text, chat.sessionId);
+      if (res.exit_reason === "not_found" && chat.sessionId) {
+        // The backend no longer knows this conversation (it restarted, or the data was reset).
+        // Drop the stale id and old cards, and send the same message into a fresh conversation.
+        forgetSession();
+        res = await api.chat(session!.userId, text, null);
+      }
+      recordChat(res);
     } catch (e) {
       addItem({ kind: "error", text: errText(e) });
     } finally {

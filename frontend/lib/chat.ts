@@ -70,6 +70,16 @@ export function ensureUser(userId: string) {
   if (load().userId !== userId) commit({ ...EMPTY, userId });
 }
 
+/** The backend lost this conversation: forget its id and grey out any card that can no longer be used. */
+export function forgetSession() {
+  setChat((s) => ({
+    ...s,
+    sessionId: null,
+    checkout: null,
+    items: s.items.map((i) => (i.kind === "card" && i.state === "pending" ? { ...i, state: "stale" as const } : i)),
+  }));
+}
+
 export function startNewErrand() {
   setChat((s) => ({ ...s, sessionId: null, items: [], checkout: null }));
 }
